@@ -17,7 +17,7 @@ import aiohttp
 from config import MAX_TOKENS_PER_AGENT, AGENT_TEMPERATURE
 
 logger = logging.getLogger(__name__)
-TIMEOUT = aiohttp.ClientTimeout(total=90)
+TIMEOUT = aiohttp.ClientTimeout(total=180)
 
 # ── Ключи ──────────────────────────────────────────────────────────────────────
 MISTRAL_API_KEY  = os.getenv("MISTRAL_API_KEY", "")
@@ -154,3 +154,16 @@ class AgentProvider:
 
 
 ai = AgentProvider()
+
+
+async def _call_with_retry(func, prompt, system, temperature, retries=2):
+    """Повторяет запрос если таймаут."""
+    for i in range(retries + 1):
+        try:
+            return await func(prompt, system, temperature)
+        except Exception as e:
+            if i == retries:
+                raise
+            logger.warning(f"Retry {i+1}/{retries}: {e}")
+            import asyncio
+            await asyncio.sleep(2)
