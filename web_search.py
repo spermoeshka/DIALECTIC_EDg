@@ -132,22 +132,27 @@ async def fetch_realtime_prices() -> dict:
         # Золото через прямой API (metals-api бесплатно)
         async def get_gold():
             try:
-                # Используем open.er-api для металлов
-                url = "https://api.metals.dev/v1/spot?api_key=demo&base=USD&currencies=XAU"
-                async with session.get(url, timeout=TIMEOUT) as r:
+                # GC=F = фьючерс золота COMEX, цена в USD за тройскую унцию
+                url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+                async with session.get(url, params={"interval": "1d", "range": "2d"},
+                                       timeout=TIMEOUT) as r:
                     if r.status == 200:
                         data = await r.json()
-                        # XAU = унция золота в USD
-                        rate = data.get("currencies", {}).get("XAU", 0)
-                        if rate and rate > 0:
-                            gold_price = round(1 / rate, 2)
+                        meta = data["chart"]["result"][0]["meta"]
+                        price = meta.get("regularMarketPrice", 0)
+                        prev = meta.get("previousClose", price) or price
+                        change = ((price - prev) / prev * 100) if prev else 0
+                        # Санитарная проверка: золото должно быть $1500-$4000
+                        if 1500 < price < 4000:
                             prices["GOLD"] = {
-                                "price": gold_price,
-                                "change_24h": 0,
-                                "source": "Metals API (live)"
+                                "price": round(price, 2),
+                                "change_24h": round(change, 2),
+                                "source": "Yahoo Finance COMEX (live)"
                             }
+                        else:
+                            logger.warning(f"Цена золота подозрительная: ${price} — пропускаю")
             except Exception as e:
-                logger.debug(f"Gold API error: {e}")
+                logger.debug(f"Gold price error: {e}")
 
         # Акции через Yahoo Finance
         async def get_stocks():
