@@ -155,10 +155,13 @@ async def fetch_realtime_prices() -> dict:
                             if ticker == "GLD":
                                 key = "GOLD"
                                 actual_price = round(price * 10, 2)
+                                source_name = "Yahoo Finance (15min delay)"
+                            else:
+                                source_name = "Yahoo Finance (15min delay)"
                             prices[key] = {
                                 "price": actual_price,
                                 "change_24h": change,
-                                "source": "Yahoo Finance GLD*10 (15min delay)"
+                                "source": source_name
                             }
                     await asyncio.sleep(0.15)
                 except Exception:
