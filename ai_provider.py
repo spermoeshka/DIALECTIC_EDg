@@ -92,7 +92,7 @@ async def _call_best_available(prompt: str, system: str,
     providers = []
 
     if MISTRAL_API_KEY:
-        providers.append(("Mistral", _call_mistral))
+        providers.append(("Mistral", _call_mistral_throttled))
     if TOGETHER_API_KEY:
         providers.append(("Together", _call_together))
     if OPENROUTER_API_KEY:
@@ -167,3 +167,18 @@ async def _call_with_retry(func, prompt, system, temperature, retries=2):
             logger.warning(f"Retry {i+1}/{retries}: {e}")
             import asyncio
             await asyncio.sleep(2)
+
+
+# Патч — добавляем задержку между запросами к Mistral
+_LAST_MISTRAL_CALL = 0
+
+async def _call_mistral_throttled(prompt: str, system: str, temperature: float) -> str:
+    """Mistral с задержкой 2 секунды между запросами."""
+    import asyncio, time
+    global _LAST_MISTRAL_CALL
+    now = time.time()
+    wait = 2.0 - (now - _LAST_MISTRAL_CALL)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _LAST_MISTRAL_CALL = time.time()
+    return await _call_mistral(prompt, system, temperature)
