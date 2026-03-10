@@ -1,14 +1,13 @@
 """
-ai_provider.py — Только Groq. Бесплатно. Работает из России.
+ai_provider.py — Gemini на Railway (сервер в Европе).
 
-Groq даёт 14400 запросов/день бесплатно.
-Модель llama-3.3-70b — уровень GPT-4, без галлюцинаций как у мелких моделей.
+Все агенты на Gemini — работает из России через Railway.
+Разные роли через разные температуры и промпты.
 
-Агенты разделены по температуре:
-  🐂 Bull     — высокая температура (творческий, ищет возможности)
-  🐻 Bear     — низкая температура (холодный, ищет риски)
-  🔍 Verifier — минимальная температура (точный, меньше галлюцинаций)
-  ⚖️ Synth    — средняя температура (взвешенный)
+🐂 Bull     — gemini-2.0-flash, temp=0.9 (творческий)
+🐻 Bear     — gemini-2.0-flash, temp=0.3 (холодный скептик)
+🔍 Verifier — gemini-2.0-flash, temp=0.1 (точный, меньше галлюцинаций)
+⚖️ Synth    — gemini-2.0-flash, temp=0.5 (взвешенный)
 """
 
 import logging
@@ -20,74 +19,59 @@ from config import MAX_TOKENS_PER_AGENT, AGENT_TEMPERATURE
 logger = logging.getLogger(__name__)
 TIMEOUT = aiohttp.ClientTimeout(total=90)
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_URL     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
-async def _call_groq(prompt: str, system: str, temperature: float) -> str:
-    if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY не задан в .env")
+async def _call_gemini(prompt: str, system: str, temperature: float) -> str:
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY не задан в переменных Railway")
 
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    full_prompt = f"{system}\n\n{prompt}" if system else prompt
+    url = f"{GEMINI_URL}?key={GEMINI_API_KEY}"
 
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
     payload = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "temperature": min(temperature, 1.0),
-        "max_tokens": MAX_TOKENS_PER_AGENT,
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": MAX_TOKENS_PER_AGENT,
+        }
     }
+
     async with aiohttp.ClientSession() as s:
-        async with s.post(GROQ_URL, json=payload,
-                          headers=headers, timeout=TIMEOUT) as resp:
+        async with s.post(url, json=payload, timeout=TIMEOUT) as resp:
             if resp.status != 200:
                 err = await resp.text()
-                raise RuntimeError(f"Groq {resp.status}: {err[:200]}")
+                raise RuntimeError(f"Gemini {resp.status}: {err[:200]}")
             data = await resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
 class AgentProvider:
-    """
-    Все агенты на Groq — бесплатно 14400 запросов/день.
-    Разные роли достигаются через разные промпты и температуры.
-    """
+    async def bull(self, prompt: str, system: str = "", temperature: float = None) -> str:
+        t = temperature or AGENT_TEMPERATURE  # 0.7
+        logger.info("🐂 Bull → Gemini Flash (temp=0.7)")
+        return await _call_gemini(prompt, system, t)
 
-    async def bull(self, prompt: str, system: str = "",
-                   temperature: float = None) -> str:
-        t = temperature or AGENT_TEMPERATURE  # 0.7 — творческий
-        logger.info("🐂 Bull → Groq Llama (temp=0.7)")
-        return await _call_groq(prompt, system, t)
+    async def bear(self, prompt: str, system: str = "", temperature: float = None) -> str:
+        t = (temperature or AGENT_TEMPERATURE) * 0.4  # 0.28 — холодный
+        logger.info("🐻 Bear → Gemini Flash (temp=0.28)")
+        return await _call_gemini(prompt, system, t)
 
-    async def bear(self, prompt: str, system: str = "",
-                   temperature: float = None) -> str:
-        t = (temperature or AGENT_TEMPERATURE) * 0.5  # 0.35 — холодный скептик
-        logger.info("🐻 Bear → Groq Llama (temp=0.35)")
-        return await _call_groq(prompt, system, t)
+    async def verifier(self, prompt: str, system: str = "", temperature: float = None) -> str:
+        t = 0.1  # минимум — факты
+        logger.info("🔍 Verifier → Gemini Flash (temp=0.1)")
+        return await _call_gemini(prompt, system, t)
 
-    async def verifier(self, prompt: str, system: str = "",
-                       temperature: float = None) -> str:
-        t = 0.1  # минимум — факты должны быть точными
-        logger.info("🔍 Verifier → Groq Llama (temp=0.1)")
-        return await _call_groq(prompt, system, t)
+    async def synth(self, prompt: str, system: str = "", temperature: float = None) -> str:
+        t = (temperature or AGENT_TEMPERATURE) * 0.6  # 0.42
+        logger.info("⚖️ Synth → Gemini Flash (temp=0.42)")
+        return await _call_gemini(prompt, system, t)
 
-    async def synth(self, prompt: str, system: str = "",
-                    temperature: float = None) -> str:
-        t = (temperature or AGENT_TEMPERATURE) * 0.6  # 0.42 — взвешенный
-        logger.info("⚖️ Synth → Groq Llama (temp=0.42)")
-        return await _call_groq(prompt, system, t)
-
-    async def complete(self, prompt: str, system: str = "",
-                       temperature: float = None) -> str:
+    async def complete(self, prompt: str, system: str = "", temperature: float = None) -> str:
         t = temperature or AGENT_TEMPERATURE
-        return await _call_groq(prompt, system, t)
+        return await _call_gemini(prompt, system, t)
 
 
 ai = AgentProvider()
