@@ -33,7 +33,7 @@ OPENAI_COMPAT_MODEL = os.getenv("OPENAI_COMPAT_MODEL", "local-model")
 
 # ─── ДЕБАТЫ ───────────────────────────────────────────────────────────────────
 DEBATE_ROUNDS = int(os.getenv("DEBATE_ROUNDS", "3"))      # 3–5 раундов
-MAX_TOKENS_PER_AGENT = int(os.getenv("MAX_TOKENS", "1200")) # токенов на ответ агента
+MAX_TOKENS_PER_AGENT = int(os.getenv("MAX_TOKENS", "1500")) # токенов на ответ агента
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMP", "0.7"))
 
 # ─── НОВОСТИ ──────────────────────────────────────────────────────────────────
