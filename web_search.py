@@ -152,14 +152,25 @@ async def fetch_realtime_prices() -> dict:
                         price = meta.get("regularMarketPrice", 0)
                         prev = meta.get("chartPreviousClose", price) or price
                         change = ((price - prev) / prev * 100) if prev else 0
-                        # Золото $1800-$4000 — реальный диапазон
-                        if 1800 < price < 4000:
+                        # Yahoo Finance для GC=F иногда отдаёт удвоенную цену
+                        # Реальный диапазон золота: $2500-$4000
+                        if 2500 < price < 4000:
                             prices["GOLD"] = {
                                 "price": round(price, 2),
                                 "change_24h": round(change, 2),
                                 "source": "Yahoo Finance (live)"
                             }
                             logger.info(f"✅ Золото GC=F: ${price}")
+                            return
+                        elif 4000 < price < 7000:
+                            # Yahoo иногда даёт удвоенную цену — делим на 2
+                            corrected = round(price / 2, 2)
+                            prices["GOLD"] = {
+                                "price": corrected,
+                                "change_24h": round(change, 2),
+                                "source": "Yahoo Finance (скорректировано)"
+                            }
+                            logger.info(f"✅ Золото GC=F скорректировано: ${price} / 2 = ${corrected}")
                             return
                         else:
                             logger.warning(f"GC=F вернул подозрительную цену: ${price}")
