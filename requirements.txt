@@ -1,0 +1,20 @@
+# Dialectic Edge v3.0 — зависимости
+# Установка: pip install -r requirements.txt
+
+# Telegram бот
+aiogram==3.13.1
+
+# HTTP клиент (async запросы)
+aiohttp==3.10.5
+
+# RSS парсер
+feedparser==6.0.11
+
+# Google Gemini (бесплатный tier)
+google-generativeai==0.8.3
+
+# База данных
+aiosqlite==0.20.0
+
+# Переменные окружения
+python-dotenv==1.0.1
