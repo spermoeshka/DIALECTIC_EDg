@@ -64,7 +64,8 @@ async def _call_openai_style(
     system: str,
     temperature: float,
     name: str,
-    extra_headers: dict = None
+    extra_headers: dict = None,
+    agent_key: str = None
 ) -> str:
     messages = []
     if system:
@@ -78,11 +79,20 @@ async def _call_openai_style(
     if extra_headers:
         headers.update(extra_headers)
 
+    # Лимиты токенов по агентам
+    _AGENT_MAX_TOKENS = {
+        "bull":     1200,   # 4 аргумента — не портянка
+        "bear":     1200,   # 5 рисков — не портянка
+        "verifier": 800,    # только факт-чек, коротко
+        "synth":    3000,   # полный синтез, никогда не обрезается
+    }
+    max_tok = _AGENT_MAX_TOKENS.get(agent_key, MAX_TOKENS_PER_AGENT)
+
     payload = {
         "model": model,
         "messages": messages,
         "temperature": min(temperature, 1.0),
-        "max_tokens": MAX_TOKENS_PER_AGENT,
+        "max_tokens": max_tok,
     }
 
     async with aiohttp.ClientSession() as s:
@@ -96,25 +106,27 @@ async def _call_openai_style(
 
 # ── Конкретные провайдеры ──────────────────────────────────────────────────────
 
-async def _call_groq(prompt: str, system: str, temperature: float, model: str = None) -> str:
+async def _call_groq(prompt: str, system: str, temperature: float, model: str = None, agent_key: str = None) -> str:
     if not GROQ_API_KEY:
         raise ValueError("Нет GROQ_API_KEY")
     return await _call_openai_style(
         GROQ_URL, GROQ_API_KEY,
         model or "llama-3.3-70b-versatile",
-        prompt, system, temperature, "Groq"
+        prompt, system, temperature, "Groq",
+        agent_key=agent_key
     )
 
-async def _call_mistral(prompt: str, system: str, temperature: float, model: str = None) -> str:
+async def _call_mistral(prompt: str, system: str, temperature: float, model: str = None, agent_key: str = None) -> str:
     if not MISTRAL_API_KEY:
         raise ValueError("Нет MISTRAL_API_KEY")
     return await _call_openai_style(
         MISTRAL_URL, MISTRAL_API_KEY,
         model or MISTRAL_MODEL,
-        prompt, system, temperature, "Mistral"
+        prompt, system, temperature, "Mistral",
+        agent_key=agent_key
     )
 
-async def _call_openrouter(prompt: str, system: str, temperature: float, model: str = None) -> str:
+async def _call_openrouter(prompt: str, system: str, temperature: float, model: str = None, agent_key: str = None) -> str:
     if not OPENROUTER_API_KEY:
         raise ValueError("Нет OPENROUTER_API_KEY")
     return await _call_openai_style(
@@ -124,16 +136,18 @@ async def _call_openrouter(prompt: str, system: str, temperature: float, model: 
         extra_headers={
             "HTTP-Referer": "https://dialectic-edge.bot",
             "X-Title": "Dialectic Edge"
-        }
+        },
+        agent_key=agent_key
     )
 
-async def _call_together(prompt: str, system: str, temperature: float, model: str = None) -> str:
+async def _call_together(prompt: str, system: str, temperature: float, model: str = None, agent_key: str = None) -> str:
     if not TOGETHER_API_KEY:
         raise ValueError("Нет TOGETHER_API_KEY")
     return await _call_openai_style(
         TOGETHER_URL, TOGETHER_API_KEY,
         model or TOGETHER_MODEL,
-        prompt, system, temperature, "Together"
+        prompt, system, temperature, "Together",
+        agent_key=agent_key
     )
 
 
@@ -165,7 +179,7 @@ async def _call_for_agent(
 
         if caller:
             try:
-                result = await caller(prompt, system, temperature, model)
+                result = await caller(prompt, system, temperature, model, agent_key=agent_key)
                 logger.info(f"[{agent_key}] → {provider}/{model} ✅")
                 return result
             except Exception as e:
