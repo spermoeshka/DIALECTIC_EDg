@@ -44,10 +44,13 @@ GROQ_URL           = "https://api.groq.com/openai/v1/chat/completions"
 # ── Модели по агентам ──────────────────────────────────────────────────────────
 # Меняй здесь — всё остальное подстроится автоматически
 AGENT_MODELS = {
-    "bull":     {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-    "bear":     {"provider": "mistral",    "model": "mistral-small-latest"},
-    "verifier": {"provider": "openrouter", "model": "google/gemma-3-27b-it:free"},
-    "synth":    {"provider": "openrouter", "model": "deepseek/deepseek-r1-0528:free"},
+    # Groq = быстрый и надёжный. Bull и Verifier — самые частые вызовы.
+    "bull":     {"provider": "groq",    "model": "llama-3.3-70b-versatile"},
+    "verifier": {"provider": "groq",    "model": "llama-3.3-70b-versatile"},
+    # Mistral = европейский скептик. Bear думает иначе чем Bull/Groq.
+    "bear":     {"provider": "mistral", "model": "mistral-small-latest"},
+    # Synth = финальный синтез. mistral-large если есть, иначе small.
+    "synth":    {"provider": "mistral", "model": "mistral-large-latest"},
 }
 
 
@@ -166,7 +169,17 @@ async def _call_for_agent(
                 logger.info(f"[{agent_key}] → {provider}/{model} ✅")
                 return result
             except Exception as e:
-                logger.warning(f"[{agent_key}] → {provider} ❌ {e} — пробую fallback")
+                logger.warning(f"[{agent_key}] → {provider}/{model} ❌ {e}")
+                # Для synth: если large недоступен — пробуем small того же провайдера
+                if agent_key == "synth" and "large" in model:
+                    try:
+                        fallback_model = "mistral-small-latest"
+                        result = await caller(prompt, system, temperature, fallback_model)
+                        logger.info(f"[{agent_key}] → fallback {provider}/{fallback_model} ✅")
+                        return result
+                    except Exception as e2:
+                        logger.warning(f"[{agent_key}] synth fallback ❌ {e2}")
+                logger.warning(f"[{agent_key}] → пробую общий fallback")
 
     # Fallback: пробуем все доступные провайдеры по порядку
     return await _call_best_available(prompt, system, temperature, agent_key)
