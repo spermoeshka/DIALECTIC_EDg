@@ -108,8 +108,15 @@ def feedback_keyboard(report_type: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def signal_to_stars(confidence: float) -> str:
-    """Конвертирует confidence 0.0–1.0 в строку звёзд ⭐"""
+def signal_to_stars(confidence) -> str:
+    """Конвертирует confidence (число 0-1 или строка HIGH/MEDIUM/LOW) в звёзды ⭐"""
+    mapping = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
+    if isinstance(confidence, str):
+        confidence = mapping.get(confidence.upper(), 0.5)
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.5
     stars = max(1, min(5, round(confidence * 5)))
     return "⭐" * stars + "☆" * (5 - stars)
 
