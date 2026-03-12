@@ -728,8 +728,9 @@ async def cmd_markets(message: Message):
     try:
         _, live_prices = await get_full_realtime_context()
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        safe_prices = clean_markdown(live_prices)
         await bot.edit_message_text(
-            f"📊 *РЫНКИ — {now}*\n\n{live_prices}",
+            f"📊 *РЫНКИ — {now}*\n\n{safe_prices}",
             chat_id=message.chat.id,
             message_id=wait_msg.message_id,
             parse_mode="Markdown"
