@@ -285,8 +285,17 @@ async def run_full_analysis(
     )
 
     # ── Добавляем уровень сигнала ⭐ сразу после первого разделителя ──────────
-    stars = signal_to_stars(sentiment_result.confidence)
-    pct   = int(sentiment_result.confidence * 100)
+    _conf_raw = sentiment_result.confidence
+    _conf_map = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
+    if isinstance(_conf_raw, str):
+        _conf_num = _conf_map.get(_conf_raw.upper(), 0.5)
+    else:
+        try:
+            _conf_num = float(_conf_raw)
+        except (TypeError, ValueError):
+            _conf_num = 0.5
+    stars = signal_to_stars(_conf_num)
+    pct   = int(_conf_num * 100)
     signal_line = (
         f"📶 *Уровень сигнала:* {stars} ({pct}% уверенности)\n"
         f"_Чем больше звёзд — тем чище и противоречивее данные для анализа_\n\n"
