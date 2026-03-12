@@ -385,7 +385,8 @@ async def cmd_start(message: Message):
         "• /trackrecord — история точности агентов\n"
         "• /weeklyreport — отчёт за неделю\n"
         "• /subscribe — авторассылка\n"
-        "• /markets — текущие цены\n\n"
+        "• /markets — текущие цены\n"
+        "• /russia — анализ для российского рынка 🇷🇺\n\n"
         "⚠️ _Не финансовый совет. Будущее неизвестно никому._",
         parse_mode="Markdown"
     )
@@ -1032,6 +1033,7 @@ async def cmd_help(message: Message):
         "• `/trackrecord` — история точности\n"
         "• `/weeklyreport` — отчёт за неделю\n"
         "• `/subscribe on 08:00` — авторассылка\n"
+        "• `/russia` — анализ для российского рынка 🇷🇺\n"
         "• `/stats` — твоя статистика\n\n"
         "⚠️ _Не финансовый совет. Будущее неизвестно никому._",
         parse_mode="Markdown"
