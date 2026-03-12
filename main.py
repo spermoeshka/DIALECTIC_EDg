@@ -1,6 +1,6 @@
 """
-Dialectic Edge v4.0 — Максимально честный AI-аналитик.
-Новое: живые цены, риск-профиль, еженедельный отчёт точности.
+Dialectic Edge v5.0 — Максимально честный AI-аналитик.
+Новое: уровень сигнала ⭐, GitHub export после каждого /daily, global scheduler.
 """
 
 import asyncio
@@ -56,30 +56,25 @@ storage = Storage()
 
 FREE_DAILY_LIMIT = 5
 
+# Глобальный scheduler — нужен для export_now() после каждого /daily
+scheduler: Scheduler = None
+
 
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 
 def clean_markdown(text: str) -> str:
-    """Убирает битый markdown который ломает Telegram."""
-    # Убираем незакрытые звёздочки и подчёркивания
-    # Считаем количество * — если нечётное, убираем все
     lines = text.split("\n")
     clean_lines = []
     for line in lines:
-        # Если нечётное количество * — убираем все одиночные *
-        star_count = line.count("*")
-        if star_count % 2 != 0:
+        if line.count("*") % 2 != 0:
             line = line.replace("*", "")
-        # Если нечётное количество _ — убираем все одиночные _
-        under_count = line.count("_")
-        if under_count % 2 != 0:
+        if line.count("_") % 2 != 0:
             line = line.replace("_", "")
-        # Убираем незакрытые backticks
-        backtick_count = line.count("`")
-        if backtick_count % 2 != 0:
+        if line.count("`") % 2 != 0:
             line = line.replace("`", "")
         clean_lines.append(line)
     return "\n".join(clean_lines)
+
 
 def split_message(text: str, max_len: int = 4000) -> list:
     text = clean_markdown(text)
@@ -96,6 +91,7 @@ def split_message(text: str, max_len: int = 4000) -> list:
         chunks.append(text)
     return chunks
 
+
 async def check_limit(user_id: int) -> bool:
     user = await get_user(user_id)
     if not user:
@@ -104,11 +100,18 @@ async def check_limit(user_id: int) -> bool:
         return True
     return user.get("requests_today", 0) < FREE_DAILY_LIMIT
 
+
 def feedback_keyboard(report_type: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="👍 Полезно", callback_data=f"fb:1:{report_type}"),
-        InlineKeyboardButton(text="👎 Мимо",   callback_data=f"fb:-1:{report_type}"),
+        InlineKeyboardButton(text="👎 Мимо",    callback_data=f"fb:-1:{report_type}"),
     ]])
+
+
+def signal_to_stars(confidence: float) -> str:
+    """Конвертирует confidence 0.0–1.0 в строку звёзд ⭐"""
+    stars = max(1, min(5, round(confidence * 5)))
+    return "⭐" * stars + "☆" * (5 - stars)
 
 
 # ─── /start ───────────────────────────────────────────────────────────────────
@@ -148,10 +151,8 @@ async def cmd_start(message: Message):
 async def cmd_profile(message: Message):
     user_id = message.from_user.id
     await upsert_user(user_id)
-
     profile = await get_profile(user_id)
 
-    # Кнопки выбора риск-профиля
     risk_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🛡️ Консерватор", callback_data="profile:risk:conservative"),
@@ -187,7 +188,6 @@ async def cmd_profile(message: Message):
 async def handle_profile(callback: CallbackQuery):
     _, param_type, value = callback.data.split(":")
     user_id = callback.from_user.id
-
     profile = await get_profile(user_id)
 
     if param_type == "risk":
@@ -205,14 +205,10 @@ async def handle_profile(callback: CallbackQuery):
     )
 
     labels = {
-        "conservative": "🛡️ Консерватор",
-        "moderate": "⚖️ Умеренный",
-        "aggressive": "🚀 Агрессивный",
-        "scalp": "⚡ Скальпинг",
-        "swing": "📈 Свинг",
-        "invest": "💎 Инвестиции",
-        "crypto": "₿ Крипта",
-        "stocks": "📈 Акции",
+        "conservative": "🛡️ Консерватор", "moderate": "⚖️ Умеренный",
+        "aggressive": "🚀 Агрессивный",   "scalp": "⚡ Скальпинг",
+        "swing": "📈 Свинг",              "invest": "💎 Инвестиции",
+        "crypto": "₿ Крипта",             "stocks": "📈 Акции",
         "all": "🌍 Все рынки",
     }
 
@@ -231,10 +227,6 @@ async def run_full_analysis(
     custom_news: str = "",
     custom_mode: bool = False
 ) -> str:
-    """
-    Полный цикл анализа с живыми ценами и профилем пользователя.
-    """
-    # Параллельно: новости + геополитика + живые цены + профиль + западные аналитики
     tasks = [
         fetcher.fetch_all(),
         fetch_full_context(),
@@ -247,41 +239,30 @@ async def run_full_analysis(
         *tasks, return_exceptions=True
     )
 
-    if isinstance(news, Exception): news = ""
-    if isinstance(geo_context, Exception): geo_context = ""
-    if isinstance(live_prices, Exception): live_prices = ""
-    if isinstance(profile, Exception): profile = {"risk": "moderate", "horizon": "swing", "markets": "all"}
+    if isinstance(news, Exception):         news = ""
+    if isinstance(geo_context, Exception):  geo_context = ""
+    if isinstance(live_prices, Exception):  live_prices = ""
+    if isinstance(profile, Exception):      profile = {"risk": "moderate", "horizon": "swing", "markets": "all"}
     if isinstance(meta_context, Exception): meta_context = ""
 
-    # Строим инструкцию под профиль
     profile_instruction = build_profile_instruction(profile)
 
-    # Контекст новостей
     if custom_mode and custom_news:
         web_context = await search_news_context(custom_news)
         news_context = (
             f"ТЕМА АНАЛИЗА: {custom_news}\n\n"
-            f"{web_context}\n\n"
-            f"{geo_context}\n\n"
-            f"{meta_context}"
+            f"{web_context}\n\n{geo_context}\n\n{meta_context}"
         )
     else:
         news_context = (
-            f"{geo_context}\n\n"
-            f"=== НОВОСТИ ===\n{news}\n\n"
-            f"{meta_context}"
+            f"{geo_context}\n\n=== НОВОСТИ ===\n{news}\n\n{meta_context}"
         )
 
-    # ── Sentiment scoring + confidence filter (Gemini suggestion) ────────────
-    # Прогоняем контекст через sentiment ПЕРЕД агентами.
-    # Агенты получают готовый score вместо стен текста.
-    # Если сигнал слабый — Synth НЕ даёт торговые рекомендации.
     sentiment_result, confidence_instruction = analyze_and_filter(
         news_context, str(live_prices)
     )
     sentiment_block = format_for_agents(sentiment_result, confidence_instruction)
 
-    # Логируем уровень сигнала
     logger.info(
         f"Sentiment: {sentiment_result.label} | "
         f"Confidence: {sentiment_result.confidence} | "
@@ -296,14 +277,31 @@ async def run_full_analysis(
         custom_mode=custom_mode
     )
 
-    # Сохраняем прогнозы для track record
+    # ── Добавляем уровень сигнала ⭐ сразу после первого разделителя ──────────
+    stars = signal_to_stars(sentiment_result.confidence)
+    pct   = int(sentiment_result.confidence * 100)
+    signal_line = (
+        f"📶 *Уровень сигнала:* {stars} ({pct}% уверенности)\n"
+        f"_Чем больше звёзд — тем чище и противоречивее данные для анализа_\n\n"
+    )
+    separator = "─" * 30 + "\n"
+    report = report.replace(separator, separator + signal_line, 1)
+
+    # ── Сохраняем прогнозы ────────────────────────────────────────────────────
     source = custom_news[:300] if custom_mode else str(news)[:300]
     await save_predictions_from_report(report, source_news=source)
-    await log_report(user_id, "analyze" if custom_mode else "daily",
-                     source, report[:500])
+    await log_report(
+        user_id,
+        "analyze" if custom_mode else "daily",
+        source,
+        report[:500]
+    )
 
     if not custom_mode:
         storage.cache_report(report)
+        # Экспортируем track record на GitHub после каждого /daily
+        if scheduler is not None:
+            asyncio.create_task(scheduler.export_now())
 
     return report
 
@@ -363,7 +361,7 @@ async def cmd_daily(message: Message):
         logger.error(f"Daily error: {e}", exc_info=True)
         await bot.edit_message_text(
             f"❌ *Ошибка:* `{str(e)[:200]}`\n\n"
-            "Проверь: Gemini API ключ, интернет, BOT_TOKEN.",
+            "Проверь: API ключи, интернет, BOT_TOKEN.",
             chat_id=message.chat.id,
             message_id=wait_msg.message_id,
             parse_mode="Markdown"
@@ -405,10 +403,7 @@ async def cmd_analyze(message: Message):
 
     try:
         await increment_requests(user_id)
-        report = await run_full_analysis(
-            user_id, custom_news=user_news, custom_mode=True
-        )
-
+        report = await run_full_analysis(user_id, custom_news=user_news, custom_mode=True)
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
 
         for chunk in split_message(report):
@@ -459,18 +454,18 @@ async def cmd_markets(message: Message):
 async def cmd_trackrecord(message: Message):
     await upsert_user(message.from_user.id)
     try:
-        data = await get_track_record()
-        stats = data["stats"]
-        recent = data["recent"]
+        data     = await get_track_record()
+        stats    = data["stats"]
+        recent   = data["recent"]
         by_asset = data["by_asset"]
 
-        total = stats.get("total") or 0
-        wins = stats.get("wins") or 0
-        losses = stats.get("losses") or 0
+        total   = stats.get("total") or 0
+        wins    = stats.get("wins") or 0
+        losses  = stats.get("losses") or 0
         pending = stats.get("pending") or 0
         avg_pnl = stats.get("avg_pnl") or 0
-        best = stats.get("best_call") or 0
-        worst = stats.get("worst_call") or 0
+        best    = stats.get("best_call") or 0
+        worst   = stats.get("worst_call") or 0
 
         if total == 0:
             await message.answer(
@@ -481,9 +476,9 @@ async def cmd_trackrecord(message: Message):
             )
             return
 
-        finished = wins + losses
-        winrate = (wins / finished * 100) if finished > 0 else 0
-        wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
+        finished  = wins + losses
+        winrate   = (wins / finished * 100) if finished > 0 else 0
+        wr_emoji  = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
         pnl_emoji = "🟢" if avg_pnl >= 0 else "🔴"
 
         lines = [
@@ -497,7 +492,7 @@ async def cmd_trackrecord(message: Message):
                 f"*Winrate:* {wr_emoji} *{winrate:.0f}%* ({wins}✅ / {losses}❌)",
                 f"*Средний P&L:* {pnl_emoji} *{avg_pnl:+.1f}%*",
             ]
-            if best: lines.append(f"*Лучший:* 🚀 +{best:.1f}%")
+            if best:              lines.append(f"*Лучший:* 🚀 +{best:.1f}%")
             if worst and worst < 0: lines.append(f"*Худший:* 💥 {worst:.1f}%")
 
         if by_asset:
@@ -513,7 +508,7 @@ async def cmd_trackrecord(message: Message):
             lines.append("\n*📋 Последние сигналы:*")
             for r in recent[:5]:
                 emoji = "✅" if r["result"] == "win" else "❌"
-                pnl = r.get("pnl_pct") or 0
+                pnl   = r.get("pnl_pct") or 0
                 lines.append(
                     f"{emoji} {r['asset']} {r['direction']} "
                     f"→ *{pnl:+.1f}%* _{(r.get('created_at') or '')[:10]}_"
@@ -540,21 +535,23 @@ async def cmd_weekly(message: Message):
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
         await message.answer(report, parse_mode="Markdown")
     except Exception as e:
-        await bot.edit_message_text(f"❌ Ошибка: {e}",
-                                    chat_id=message.chat.id,
-                                    message_id=wait_msg.message_id)
+        await bot.edit_message_text(
+            f"❌ Ошибка: {e}",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id
+        )
 
 
 # ─── /subscribe ───────────────────────────────────────────────────────────────
 
 @dp.message(Command("subscribe"))
 async def cmd_subscribe(message: Message):
-    user_id = message.from_user.id
+    user_id   = message.from_user.id
     await upsert_user(user_id)
-    user = await get_user(user_id)
+    user      = await get_user(user_id)
     is_subbed = user.get("daily_sub", 0) if user else 0
-    sub_time = user.get("sub_time", "08:00") if user else "08:00"
-    parts = message.text.split()
+    sub_time  = user.get("sub_time", "08:00") if user else "08:00"
+    parts     = message.text.split()
 
     if len(parts) == 1:
         status = f"✅ Активна (каждый день в *{sub_time} UTC*)" if is_subbed else "❌ Отключена"
@@ -567,7 +564,7 @@ async def cmd_subscribe(message: Message):
         )
         return
 
-    action = parts[1].lower()
+    action   = parts[1].lower()
     time_str = parts[2] if len(parts) > 2 else "08:00"
     try:
         h, m = time_str.split(":")
@@ -595,20 +592,26 @@ async def cmd_subscribe(message: Message):
 async def cmd_stats(message: Message):
     user_id = message.from_user.id
     await upsert_user(user_id)
-    user = await get_user(user_id)
+    user    = await get_user(user_id)
     profile = await get_profile(user_id)
 
     if not user:
         await message.answer("Ошибка загрузки.")
         return
 
-    fb = await get_feedback_stats()
-    total_fb = fb.get("total") or 0
-    pos_fb = fb.get("positive") or 0
+    fb           = await get_feedback_stats()
+    total_fb     = fb.get("total") or 0
+    pos_fb       = fb.get("positive") or 0
     satisfaction = (pos_fb / total_fb * 100) if total_fb > 0 else 0
 
-    risk_name = RISK_PROFILES.get(profile.get("risk", "moderate"), {}).get("name", "⚖️ Умеренный")
+    risk_name    = RISK_PROFILES.get(profile.get("risk", "moderate"), {}).get("name", "⚖️ Умеренный")
     horizon_name = HORIZONS.get(profile.get("horizon", "swing"), {}).get("name", "📈 Свинг")
+
+    tr      = await get_track_record()
+    tr_s    = tr["stats"]
+    tr_wins = tr_s.get("wins") or 0
+    tr_loss = tr_s.get("losses") or 0
+    tr_wr   = (tr_wins / (tr_wins + tr_loss) * 100) if (tr_wins + tr_loss) > 0 else 0
 
     await message.answer(
         f"📈 *Моя статистика*\n\n"
@@ -617,9 +620,11 @@ async def cmd_stats(message: Message):
         f"*Запросов всего:* {user.get('requests_total',0)}\n"
         f"*Профиль:* {risk_name} | {horizon_name}\n"
         f"*Подписка:* {'✅' if user.get('daily_sub') else '❌'}\n\n"
-        f"*Бот в целом:*\n"
+        f"*🎯 Track Record бота:*\n"
+        f"Прогнозов: {tr_s.get('total',0)} | Winrate: {tr_wr:.0f}%\n\n"
+        f"*Оценки пользователей:*\n"
         f"Оценок: {total_fb} | Позитивных: {satisfaction:.0f}%\n\n"
-        f"• /trackrecord — точность агентов\n"
+        f"• /trackrecord — полная история точности\n"
         f"• /weeklyreport — отчёт за неделю\n"
         f"• /profile — изменить профиль",
         parse_mode="Markdown"
@@ -632,12 +637,11 @@ async def cmd_stats(message: Message):
 async def cmd_help(message: Message):
     await upsert_user(message.from_user.id)
     await message.answer(
-        "📖 *Dialectic Edge v4.0*\n\n"
-        "*Что нового:*\n"
-        "• Живые цены прямо в анализ (не угадывают)\n"
-        "• Профиль под твой риск-стиль\n"
-        "• Еженедельный честный отчёт точности\n"
-        "• Агенты маркируют неуверенность\n\n"
+        "📖 *Dialectic Edge v5.0*\n\n"
+        "*Что нового в v5:*\n"
+        "• Уровень сигнала ⭐⭐⭐⭐⭐ в каждом анализе\n"
+        "• FORECASTS.md на GitHub обновляется после каждого /daily\n"
+        "• Track Record в /stats\n\n"
         "*Команды:*\n"
         "• `/profile` — настрой риск-профиль первым\n"
         "• `/daily` — дайджест рынков\n"
@@ -658,13 +662,13 @@ async def cmd_help(message: Message):
 async def cmd_admin(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    stats = await get_admin_stats()
-    fb = await get_feedback_stats()
-    tr = await get_track_record()
+    stats    = await get_admin_stats()
+    fb       = await get_feedback_stats()
+    tr       = await get_track_record()
     tr_stats = tr["stats"]
-    wins = tr_stats.get("wins") or 0
-    losses = tr_stats.get("losses") or 0
-    winrate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+    wins     = tr_stats.get("wins") or 0
+    losses   = tr_stats.get("losses") or 0
+    winrate  = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
 
     await message.answer(
         f"🔧 *ADMIN*\n\n"
@@ -694,9 +698,11 @@ async def handle_feedback(callback: CallbackQuery):
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 
 async def main():
+    global scheduler
+
     await init_db()
     await init_profiles_table()
-    logger.info("🚀 Dialectic Edge v4.0 starting...")
+    logger.info("🚀 Dialectic Edge v5.0 starting...")
 
     scheduler = Scheduler(
         bot=bot,
@@ -708,6 +714,7 @@ async def main():
         dp.start_polling(bot),
         scheduler.start()
     )
+
 
 if __name__ == "__main__":
     asyncio.run(main())
