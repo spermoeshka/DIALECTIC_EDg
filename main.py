@@ -44,6 +44,8 @@ from user_profile import (
     RISK_PROFILES, HORIZONS, MARKETS
 )
 from weekly_report import build_weekly_report, send_weekly_reports
+from russia_data import fetch_russia_context
+from russia_agents import run_russia_analysis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +65,9 @@ scheduler: Scheduler = None
 # Хранилище дебатов для листания по кнопкам
 # {user_id: {"rounds": [...], "full_report": str}}
 debate_cache: dict = {}
+
+# Кэш РФ анализа (обновляется вместе с /daily)
+russia_cache: dict = {}  # {"report": str, "timestamp": str}
 
 
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
@@ -711,6 +716,87 @@ async def cmd_analyze(message: Message):
 
     except Exception as e:
         logger.error(f"Analyze error: {e}", exc_info=True)
+        await bot.edit_message_text(
+            f"❌ *Ошибка:* `{str(e)[:200]}`",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+
+
+
+# ─── /russia ──────────────────────────────────────────────────────────────────
+
+@dp.message(Command("russia"))
+async def cmd_russia(message: Message):
+    user_id = message.from_user.id
+    await upsert_user(user_id, message.from_user.username or "")
+
+    if not await check_limit(user_id):
+        await message.answer(
+            f"⛔ *Лимит* — {FREE_DAILY_LIMIT} запросов/день (free)",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Проверяем кэш РФ (живёт 2 часа как основной)
+    import time
+    now_ts = time.time()
+    if russia_cache.get("report") and (now_ts - russia_cache.get("ts", 0)) < 7200:
+        cached_ru = russia_cache["report"]
+        for chunk in split_message(cached_ru):
+            await message.answer(chunk, parse_mode="Markdown")
+        await message.answer(
+            f"📦 _Кэш от {russia_cache['timestamp']}. Новый через 2ч._",
+            parse_mode="Markdown",
+            reply_markup=feedback_keyboard("russia")
+        )
+        return
+
+    # Нужен глобальный анализ как основа
+    global_report = ""
+    cached = storage.get_cached_report()
+    if cached:
+        global_report = cached["report"]
+    else:
+        global_report = "Глобальный анализ пока не готов. Запусти /daily сначала."
+
+    wait_msg = await message.answer(
+        "🇷🇺 *Запускаю анализ для России...*\n\n"
+        "🔄 ЦБ РФ → Мосбиржа → РБК → YandexGPT агенты → Синтез\n"
+        "_Займёт 1–3 минуты..._",
+        parse_mode="Markdown"
+    )
+
+    try:
+        await increment_requests(user_id)
+
+        # Собираем РФ данные
+        russia_context = await fetch_russia_context()
+
+        # Запускаем диалектический анализ
+        report = await run_russia_analysis(global_report, russia_context)
+
+        # Кэшируем
+        from datetime import datetime
+        import time
+        russia_cache["report"]    = report
+        russia_cache["timestamp"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        russia_cache["ts"]        = time.time()
+
+        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+
+        for chunk in split_message(report):
+            await message.answer(chunk, parse_mode="Markdown")
+
+        await message.answer(
+            "💬 *Был ли анализ полезным?*",
+            parse_mode="Markdown",
+            reply_markup=feedback_keyboard("russia")
+        )
+
+    except Exception as e:
+        logger.error(f"Russia error: {e}", exc_info=True)
         await bot.edit_message_text(
             f"❌ *Ошибка:* `{str(e)[:200]}`",
             chat_id=message.chat.id,
