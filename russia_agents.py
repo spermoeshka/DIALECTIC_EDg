@@ -147,50 +147,76 @@ RUSSIA_SYNTH_SYSTEM = """Ты — финальный синтезатор для
 
 # ─── Groq вызов ───────────────────────────────────────────────────────────────
 
+async def call_groq_or_mistral(system: str, user_message: str) -> str:
+    """Groq/Llama первый выбор, Mistral Small как fallback при rate limit."""
+
+    # Сначала пробуем Groq
+    if GROQ_API_KEY:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_message},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 1500,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    GROQ_URL, json=payload, headers=headers, timeout=TIMEOUT
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        logger.info("✅ Groq агент отработал")
+                        return data["choices"][0]["message"]["content"]
+                    elif resp.status == 429:
+                        logger.warning("⚠️ Groq rate limit — переключаюсь на Mistral Small")
+                    else:
+                        logger.warning(f"Groq {resp.status} — переключаюсь на Mistral Small")
+        except Exception as e:
+            logger.warning(f"Groq недоступен ({e}) — переключаюсь на Mistral Small")
+
+    # Fallback — Mistral Small (дешёвый, быстрый)
+    if MISTRAL_API_KEY:
+        headers = {
+            "Authorization": f"Bearer {MISTRAL_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "mistral-small-latest",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_message},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 1500,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    MISTRAL_URL, json=payload, headers=headers, timeout=TIMEOUT
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        logger.info("✅ Mistral Small fallback отработал")
+                        return data["choices"][0]["message"]["content"]
+                    else:
+                        error = await resp.text()
+                        logger.error(f"Mistral Small error {resp.status}: {error[:200]}")
+        except Exception as e:
+            logger.error(f"Mistral Small exception: {e}")
+
+    return "⚠️ Все провайдеры недоступны"
+
+
+# Алиас для обратной совместимости
 async def call_groq(system: str, user_message: str) -> str:
-    if not GROQ_API_KEY:
-        return "⚠️ GROQ_API_KEY не настроен"
-
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user_message},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 1500,
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                GROQ_URL, json=payload, headers=headers, timeout=TIMEOUT
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
-                elif resp.status == 429:
-                    logger.warning("Groq rate limit — пауза 10 сек")
-                    await asyncio.sleep(10)
-                    # Повторная попытка
-                    async with session.post(
-                        GROQ_URL, json=payload, headers=headers, timeout=TIMEOUT
-                    ) as resp2:
-                        if resp2.status == 200:
-                            data = await resp2.json()
-                            return data["choices"][0]["message"]["content"]
-                    return "⚠️ Groq rate limit — попробуй через минуту"
-                else:
-                    error = await resp.text()
-                    logger.error(f"Groq error {resp.status}: {error[:200]}")
-                    return f"⚠️ Groq ошибка {resp.status}"
-    except Exception as e:
-        logger.error(f"Groq exception: {e}")
-        return f"⚠️ Groq недоступен: {str(e)[:100]}"
+    return await call_groq_or_mistral(system, user_message)
 
 
 # ─── Mistral синтез ───────────────────────────────────────────────────────────
