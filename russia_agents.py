@@ -251,7 +251,7 @@ async def run_russia_analysis(global_report: str, russia_context: str) -> str:
     logger.info("🦙 Запускаю Groq агентов...")
 
     opportunities = await call_groq(RUSSIA_OPPORTUNITIES_SYSTEM, combined)
-    await asyncio.sleep(2)  # пауза между запросами Groq
+    await asyncio.sleep(6)  # пауза между запросами Groq (rate limit protection)
     risks = await call_groq(RUSSIA_RISKS_SYSTEM, combined)
 
     logger.info("✅ Groq агенты завершили, запускаю Mistral синтез...")
