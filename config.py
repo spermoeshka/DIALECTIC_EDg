@@ -9,6 +9,9 @@ import os
 # Получить токен: https://t.me/BotFather → /newbot
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 
+#FRED API
+FRED_API_KEY = "3b34773311b4643e29380b407296a534"
+
 # ID администраторов (можно узнать через @userinfobot)
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "0").split(",") if x.strip().isdigit()]
 
