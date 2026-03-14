@@ -88,15 +88,19 @@ def clean_markdown(text: str) -> str:
 
 
 def split_message(text: str, max_len: int = 3800) -> list:
-    text = clean_markdown(text)
+    # Агрессивно чистим весь markdown — убираем *, _, `, #
+    import re
+    text = re.sub(r'[*_`#]', '', text)
+    # Убираем двойные пробелы и лишние пустые строки
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = text.strip()
+
     if len(text) <= max_len:
         return [text]
     chunks = []
     while len(text) > max_len:
-        # Ищем последний перенос строки в пределах лимита
         split_at = text.rfind("\n", 0, max_len)
         if split_at == -1 or split_at < max_len // 2:
-            # Если нет переноса — режем по пробелу
             split_at = text.rfind(" ", 0, max_len)
         if split_at == -1:
             split_at = max_len
