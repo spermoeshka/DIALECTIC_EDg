@@ -262,12 +262,12 @@ def build_short_report(parts: dict, stars: str, pct: int) -> str:
     )
 
     synthesis_text = parts['synthesis'] + "\n\n" + parts['disclaimer']
-    # Сохраняем чанки в parts для отправки нескольких сообщений
-    parts["_header"] = clean_markdown(header)
-    parts["_synthesis_chunks"] = split_message(clean_markdown(synthesis_text))
+    synthesis_chunks = split_message(clean_markdown(synthesis_text))
 
-    # Возвращаем header + первый чанк синтеза
-    return clean_markdown(header + parts["_synthesis_chunks"][0])
+    # Сохраняем чанки в parts чтобы caller мог отправить остаток
+    parts["_synthesis_chunks"] = synthesis_chunks
+
+    return clean_markdown(header) + synthesis_chunks[0]
 
 
 def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
@@ -603,15 +603,13 @@ async def cmd_daily(message: Message):
         # Кэшируем раунды для листания
         debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
 
-        # Отправляем header + первый чанк синтеза
+        # Отправляем первый чанк
         await message.answer(short, parse_mode="Markdown")
 
-        # Отправляем оставшиеся чанки синтеза если есть
-        extra_chunks = parts.get("_synthesis_chunks", [])[1:]
-        for chunk in extra_chunks:
+        # Остаток синтеза если не влез
+        for chunk in parts.get("_synthesis_chunks", [])[1:]:
             await message.answer(chunk, parse_mode="Markdown")
 
-        # Кнопки под последним сообщением
         await message.answer(
             "📖 _Полный анализ выше_",
             parse_mode="Markdown",
@@ -651,15 +649,14 @@ async def cmd_daily(message: Message):
         # Кэшируем раунды для кнопки
         debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
 
-        # Строим короткое сообщение
+        # Строим короткое сообщение (parts["_synthesis_chunks"] заполняется внутри)
         short = build_short_report(parts, stars_str, pct_val)
 
-        # Отправляем header + первый чанк синтеза
+        # Отправляем первый чанк (header + начало синтеза)
         await message.answer(short, parse_mode="Markdown")
 
-        # Отправляем оставшиеся чанки синтеза если есть
-        extra_chunks = parts.get("_synthesis_chunks", [])[1:]
-        for chunk in extra_chunks:
+        # Отправляем оставшиеся чанки синтеза если синтез не влез в одно сообщение
+        for chunk in parts.get("_synthesis_chunks", [])[1:]:
             await message.answer(chunk, parse_mode="Markdown")
 
         # Кнопки под последним сообщением
