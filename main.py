@@ -249,7 +249,7 @@ def build_short_report(parts: dict, stars: str, pct: int) -> str:
         bull_summary = "\n".join(bull_lines[:3]) if bull_lines else "Позиция бычья"
         bear_summary = "\n".join(bear_lines[:3]) if bear_lines else "Позиция медвежья"
 
-    short = (
+    header = (
         f"📊 *DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ*\n"
         f"🕐 _{now}_\n\n"
         f"💬 _4 AI-модели изучили рынок и поспорили. Вот что вышло:_\n\n"
@@ -259,11 +259,15 @@ def build_short_report(parts: dict, stars: str, pct: int) -> str:
         f"🐂 *Бычья позиция (кратко):*\n{bull_summary}\n\n"
         f"🐻 *Медвежья позиция (кратко):*\n{bear_summary}\n\n"
         f"{'─' * 30}\n\n"
-        f"{parts['synthesis']}\n\n"
-        f"{parts['disclaimer']}"
     )
 
-    return clean_markdown(short)
+    synthesis_text = parts['synthesis'] + "\n\n" + parts['disclaimer']
+    # Сохраняем чанки в parts для отправки нескольких сообщений
+    parts["_header"] = clean_markdown(header)
+    parts["_synthesis_chunks"] = split_message(clean_markdown(synthesis_text))
+
+    # Возвращаем header + первый чанк синтеза
+    return clean_markdown(header + parts["_synthesis_chunks"][0])
 
 
 def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
@@ -599,11 +603,17 @@ async def cmd_daily(message: Message):
         # Кэшируем раунды для листания
         debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
 
-        chunks = split_message(short)
-        for chunk in chunks[:-1]:
+        # Отправляем header + первый чанк синтеза
+        await message.answer(short, parse_mode="Markdown")
+
+        # Отправляем оставшиеся чанки синтеза если есть
+        extra_chunks = parts.get("_synthesis_chunks", [])[1:]
+        for chunk in extra_chunks:
             await message.answer(chunk, parse_mode="Markdown")
+
+        # Кнопки под последним сообщением
         await message.answer(
-            chunks[-1],
+            "📖 _Полный анализ выше_",
             parse_mode="Markdown",
             reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
         )
@@ -644,11 +654,17 @@ async def cmd_daily(message: Message):
         # Строим короткое сообщение
         short = build_short_report(parts, stars_str, pct_val)
 
-        chunks = split_message(short)
-        for chunk in chunks[:-1]:
+        # Отправляем header + первый чанк синтеза
+        await message.answer(short, parse_mode="Markdown")
+
+        # Отправляем оставшиеся чанки синтеза если есть
+        extra_chunks = parts.get("_synthesis_chunks", [])[1:]
+        for chunk in extra_chunks:
             await message.answer(chunk, parse_mode="Markdown")
+
+        # Кнопки под последним сообщением
         await message.answer(
-            chunks[-1],
+            "📖 _Полный анализ выше_",
             parse_mode="Markdown",
             reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
         )
