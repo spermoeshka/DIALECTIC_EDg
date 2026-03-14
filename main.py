@@ -283,14 +283,18 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
     if synth_start != -1:
         synth_and_rest = full[synth_start:]
     else:
-        # Fallback — берём synthesis + disclaimer из parts
         synth_and_rest = parts.get("synthesis", "") + "\n\n" + parts.get("disclaimer", "")
 
-    # Режем на чанки по 2500 символов — гарантированно влезают в TG
-    for chunk in split_message(synth_and_rest, max_len=2500):
+    logger.info(f"synth_and_rest size: {len(synth_and_rest)} chars")
+
+    # Режем на чанки по 2500 символов
+    chunks = split_message(synth_and_rest, max_len=2500)
+    logger.info(f"Total chunks: {len(chunks)}, sizes: {[len(c) for c in chunks]}")
+    for chunk in chunks:
         if chunk.strip():
             messages.append(chunk)
 
+    logger.info(f"Total messages to send: {len(messages)}")
     return messages
 
 
@@ -669,6 +673,7 @@ async def cmd_daily(message: Message):
         for i, msg in enumerate(messages):
             logger.info(f"Отправляю чанк {i+1}/{len(messages)}, размер: {len(msg)}")
             await message.answer(msg)
+            await asyncio.sleep(0.3)  # пауза между сообщениями
 
         await message.answer(
             "Полный анализ выше",
