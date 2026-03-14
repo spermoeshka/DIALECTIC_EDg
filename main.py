@@ -217,10 +217,10 @@ def parse_report_parts(report: str) -> dict:
 
 def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
-    Возвращает СПИСОК сообщений для отправки:
-    [0] = шапка + Bull/Bear кратко
-    [1..N] = синтез по чанкам
-    [N+1] = дисклеймер
+    Возвращает СПИСОК сообщений для отправки.
+    Шапка с Bull/Bear кратко — первое сообщение.
+    Затем полный синтез режется на чанки.
+    Дисклеймер — последнее сообщение.
     """
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
@@ -252,7 +252,7 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
         if bear_lines:
             bear_summary = "\n".join(bear_lines)
 
-    # Шапка — всегда первое сообщение
+    # Шапка — первое сообщение
     header = (
         f"📊 DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ\n"
         f"🕐 {now}\n\n"
@@ -267,14 +267,14 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
 
     messages = [header]
 
-    # Синтез режем на чанки без Markdown parse_mode (plain text надёжнее)
-    synthesis = parts.get('synthesis', '')
+    # Синтез — режем на чанки по 3500 символов
+    synthesis = parts.get("synthesis", "").strip()
     if synthesis:
-        for chunk in split_message(synthesis):
+        for chunk in split_message(synthesis, max_len=3500):
             messages.append(chunk)
 
-    # Дисклеймер отдельно
-    disclaimer = parts.get('disclaimer', '')
+    # Дисклеймер — последнее сообщение
+    disclaimer = parts.get("disclaimer", "").strip()
     if disclaimer:
         messages.append(disclaimer)
 
@@ -652,7 +652,9 @@ async def cmd_daily(message: Message):
         debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
 
         messages = build_short_report(parts, stars_str, pct_val)
-        for msg in messages:
+        logger.info(f"Отправляю {len(messages)} сообщений. Размеры: {[len(m) for m in messages]}")
+        for i, msg in enumerate(messages):
+            logger.info(f"Отправляю чанк {i+1}/{len(messages)}, размер: {len(msg)}")
             await message.answer(msg)
 
         await message.answer(
