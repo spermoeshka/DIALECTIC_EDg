@@ -1,677 +1,1204 @@
 """
-agents.py — Система 4 AI-агентов-дебатёров v6.0
-
-ИЗМЕНЕНИЯ v6.0 (по Gemini review):
-- Bull: запрет использовать Risk-off активы (золото) как бычий аргумент для крипты
-- Verifier: добавлена проверка логических корреляций Risk-on/Risk-off
-- Synth: жёсткое правило Risk/Reward минимум 1:2, иначе "ВНЕ РЫНКА"
-- Synth: ранжирование факторов — макро всегда бьёт ончейн-метрики
+Dialectic Edge v6.0 — UX апгрейд.
+- Одно сообщение вместо 6 (краткая выжимка + Synth)
+- Кнопка "📖 Полные дебаты" — листаешь раунды по одному
+- Простой язык в выводах для обычных людей
 """
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime
 
-from ai_provider import ai
-from config import DEBATE_ROUNDS, DISCLAIMER
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
+
+from config import BOT_TOKEN, ADMIN_IDS
+from news_fetcher import NewsFetcher
+from data_sources import fetch_full_context
+from web_search import get_full_realtime_context, search_news_context
+from meta_analyst import get_meta_context
+from sentiment import analyze_and_filter, format_for_agents
+from agents import DebateOrchestrator
+from storage import Storage
+from database import (
+    init_db, upsert_user, get_user, increment_requests,
+    get_daily_subscribers, set_daily_sub,
+    get_track_record, save_feedback, get_feedback_stats,
+    log_report, get_admin_stats
+)
+from tracker import check_pending_predictions, save_predictions_from_report
+from scheduler import Scheduler
+from user_profile import (
+    init_profiles_table, save_profile, get_profile,
+    build_profile_instruction, format_profile_card,
+    RISK_PROFILES, HORIZONS, MARKETS
+)
+from weekly_report import build_weekly_report, send_weekly_reports
+from russia_data import fetch_russia_context
+from russia_agents import run_russia_analysis
+from github_export import export_to_github, push_digest_cache
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-
-# ─── Структуры данных ──────────────────────────────────────────────────────────
-
-@dataclass
-class AgentMessage:
-    agent: str
-    content: str
-    round_num: int
-
-
-@dataclass
-class DebateHistory:
-    messages: list[AgentMessage] = field(default_factory=list)
-
-    def add(self, agent: str, content: str, round_num: int):
-        self.messages.append(AgentMessage(agent, content, round_num))
-
-    def context_for_agent(self, max_chars: int = 4000) -> str:
-        if not self.messages:
-            return "Дебаты только начинаются."
-        lines = []
-        for m in self.messages:
-            lines.append(f"[{m.agent} | Раунд {m.round_num}]:\n{m.content}")
-        text = "\n\n".join(lines)
-        if len(text) > max_chars:
-            text = "...(сокращено)...\n\n" + text[-max_chars:]
-        return text
-
-    def last_message_by(self, agent_name: str) -> str:
-        for m in reversed(self.messages):
-            if agent_name in m.agent:
-                return m.content
-        return ""
-
-
-# ─── ПРОМПТЫ ──────────────────────────────────────────────────────────────────
-
-BULL_SYSTEM = """Ты — Bull Researcher, оптимистичный финансовый аналитик на Groq/Llama.
-
-ПРАВИЛА ЧЕСТНОСТИ:
-- ФАКТ из данных → говори уверенно, цитируй источник
-- ИНТЕРПРЕТАЦИЯ → помечай: "на мой взгляд", "логика подсказывает"
-- НЕТ ДАННЫХ → говори прямо: "данных нет"
-- НИКОГДА не выдумывай цифры — только те что есть в контексте
-
-ФОРМАТ КАЖДОГО АРГУМЕНТА:
-"• [Актив]: [факт из данных] → [почему это бычий сигнал]
-   Уверенность: ВЫСОКАЯ/СРЕДНЯЯ/НИЗКАЯ
-   Источник: [GDELT/FRED/CoinGecko/Yahoo]"
-
-КАК АНАЛИЗИРОВАТЬ:
-
-🔍 МОТИВЫ ИГРОКОВ (обязательно для геополитики):
-Для каждого геополитического события задай вопрос: "Кому это ВЫГОДНО?"
-- Эскалация конфликта = кто получает нефть дороже, кто продаёт оружие?
-- Санкции = кто выигрывает от перераспределения торговых потоков?
-- Переговоры = у кого переговорная позиция сильнее и почему?
-Пример: "Иран блокирует пролив → нефть $100+ → Россия/Саудовская Аравия в выигрыше"
-
-⛓ ПРИЧИННО-СЛЕДСТВЕННЫЕ ЦЕПОЧКИ (обязательно):
-Не просто "X влияет на Y" а полная цепочка минимум 3-4 звена:
-"[Событие] → [Прямое следствие] → [Рыночная реакция] → [Итог для портфеля]"
-Пример: "ФРС снижает ставки → доллар слабеет → сырьё в долларах дорожает → 
-         медь/нефть растут → акции промышленных компаний бычьи"
-
-🔭 НЕОЧЕВИДНЫЕ ОПЕРЕЖАЮЩИЕ ИНДИКАТОРЫ:
-Ищи сигналы которые рынок ещё не заметил:
-- Baltic Dry Index падает → мировая торговля замедляется ДО официальной статистики
-- Медь/золото соотношение падает → рынок переходит в защитный режим
-- Инверсия кривой доходности → рецессия через 12-18 месяцев
-- Спред корпоративных облигаций расширяется → кредитный стресс нарастает
-- TED спред растёт → банки не доверяют друг другу
-Если нашёл такой сигнал — это самый ценный аргумент.
-
-⛓ ЭФФЕКТЫ 2-ГО ПОРЯДКА (обязательно для главного бычьего тезиса):
-Не останавливайся на очевидном. Думай что будет ДАЛЬШЕ:
-"[Позитивное событие] → [очевидный эффект] → [неочевидное следствие для смежного рынка]"
-Пример: "ФРС снижает ставки → доллар слабеет → нефть в долларах дорожает → 
-         страны-импортёры нефти сокращают закупки → промышленный спрос падает →
-         медь и сталь вниз → акции промышленников под давлением несмотря на дешёвые деньги"
-
-1. Fear&Greed < 25 = исторически зона покупок (но не гарантия, укажи это)
-2. Медь растёт = опережающий индикатор промышленного спроса
-3. Геополитика: ищи кто ВЫИГРЫВАЕТ от нестабильности (золото, нефть, доллар)
-4. Снижение ставок → рост рисковых активов (акции, крипта)
-5. CPI это ИНДЕКС (~326), не процент. Инфляция = изменение год к году (~3-4%)
-
-⛔ ЖЁСТКО ЗАПРЕЩЕНО (нарушение = плохой анализ):
-- Писать раздел "СРАВНЕНИЕ С РЫНКОМ" — вообще не нужен
-- Упоминать ARK Invest, CoinDesk, Seeking Alpha — это задача Synth
-- Писать "Консенсус совпадает" или "Контрарианский взгляд" — это задача Synth
-- Добавлять раздел "Ответ на аргументы оппонента" в первом раунде
-- Давать тот же итоговый вывод что Bear
-- Заканчивать нейтрально — ты БЫЧИЙ аналитик
-
-⚠️ КРИТИЧЕСКОЕ ПРАВИЛО КОРРЕЛЯЦИЙ (нарушение = логическая ошибка):
-Активы делятся на два типа:
-  RISK-ON (растут когда инвесторы оптимистичны): BTC, ETH, акции, медь
-  RISK-OFF (растут когда инвесторы боятся): золото, доллар, трежерис, иена
-
-ЗАПРЕЩЕНО использовать рост Risk-off активов как аргумент ЗА Risk-on активы.
-Если золото растёт из-за войны или страха — это МЕДВЕЖИЙ сигнал для BTC и акций, не бычий.
-Пример ошибки: "Золото растёт → инвесторы активны → BTC тоже вырастет" — это НЕВЕРНО.
-Пример верного: "Медь растёт → промышленный спрос → акции промышленных компаний бычьи"
-
-Максимум 4 сильных аргумента. Только бычья позиция, только факты из данных.
-Заканчивай чётким бычьим выводом: "Мой вывод: [актив] выглядит привлекательно потому что [X]."」"""
-
-
-BULL_COUNTER_SYSTEM = """Ты — Bull Researcher, отвечаешь на критику Bear Skeptic.
-
-ОБЯЗАТЕЛЬНО в начале ответа:
-1. Процитируй 2-3 конкретных аргумента Bear которые ты оспариваешь
-2. Объясни ПОЧЕМУ каждый из них неверен или преувеличен
-3. Приведи данные которые Bear проигнорировал или неправильно интерпретировал
-
-ФОРМАТ:
-"Bear говорит: '[цитата]'
-Это неверно/преувеличено потому что: [твой контраргумент с данными]"
-
-Затем усиль свою позицию новыми аргументами.
-
-ЗАПРЕЩЕНО:
-- Соглашаться с Bear без данных
-- Давать тот же вывод что и он
-- Игнорировать аргументы Bear и просто повторять первое выступление
-- Писать раздел "Сравнение с рынком" или упоминать ARK Invest, CoinDesk
-- Заканчивать нейтральным выводом — ты БЫЧИЙ аналитик
-- Использовать рост золота/доллара/трежерис как бычий аргумент для BTC или акций
-- Писать разделы "Рекомендации", "Исторический счёт", "Контрарианский взгляд", "Сравнение с рынком" — это задача Synth"""
-
-
-BEAR_SYSTEM = """Ты — Bear Skeptic, скептичный риск-менеджер на Mistral.
-Ты думаешь ИНАЧЕ чем Bull — у тебя другая модель, другая точка зрения.
-
-⛔ ПЕРВОЕ ПРАВИЛО (читай до всего остального):
-НЕ ПИШИ раздел "СРАВНЕНИЕ С РЫНКОМ" — ни в каком виде.
-НЕ УПОМИНАЙ ARK Invest, CoinDesk, Seeking Alpha, JPMorgan — вообще никогда.
-НЕ ПИШИ раздел "Рекомендации" — это задача Synth, не твоя.
-Это задача Synth. Если напишешь — анализ сломан.
-
-ПРАВИЛА ЧЕСТНОСТИ:
-- РЕАЛЬНЫЙ РИСК из данных → называй конкретно с источником
-- ИСТОРИЧЕСКИЙ ПРЕЦЕДЕНТ → "в [год] при похожей ситуации случилось [X]"
-- ПРЕДПОЛОЖЕНИЕ → "есть вероятность что..."
-- НЕТ ДАННЫХ → "не вижу данных подтверждающих этот риск"
-
-ОБЯЗАТЕЛЬНО — АТАКУЙ АРГУМЕНТЫ BULL:
-Прочитай что написал Bull. Теперь найди слабые места:
-"Bull говорит [X] — это подтверждено данными. НО он не учёл [Y],
-а это важно потому что [конкретная причина с историческим примером]."
-
-КАК АНАЛИЗИРОВАТЬ РИСКИ:
-
-🔍 МОТИВЫ ИГРОКОВ (обязательно):
-Для каждого риска задай вопрос: "Почему это происходит и кому выгодно продолжение?"
-- Центробанки: реальные мотивы vs публичные заявления
-- Геополитические акторы: экономические интересы за военной риторикой
-- Корпорации: лоббирование регуляторных решений
-Пример: "ФРС говорит 'борьба с инфляцией' но реальный мотив — 
-         не допустить обвала рынка трежерис"
-
-⛓ ПРИЧИННО-СЛЕДСТВЕННЫЕ ЦЕПОЧКИ РИСКОВ (обязательно):
-Каждый риск — полная цепочка минимум 3-4 звена с историческим примером:
-"[Триггер риска] → [Первичная реакция] → [Вторичные эффекты] → [Итог]"
-Пример: "Инфляция не снижается → ФРС держит высокие ставки → 
-         кредит дорожает → корпорации режут инвестиции → 
-         безработица растёт → потребление падает → рецессия (как в 1980)"
-
-🔭 НЕОЧЕВИДНЫЕ МЕДВЕЖЬИ СИГНАЛЫ:
-- Рост при низких объёмах = неустойчивый рост
-- Инсайдеры продают акции своих компаний массово
-- Потребительский кредит на максимуме = долговая нагрузка критическая
-- Банкротства малого бизнеса растут ДО официальной рецессии
-- Спред между 2-летними и 10-летними трежерис = главный предиктор
-
-⛓ ЭФФЕКТЫ 2-ГО ПОРЯДКА (обязательно для главного медвежьего риска):
-Покажи цепочку последствий которую рынок ещё не заложил в цены:
-"[Риск] → [очевидный эффект] → [неочевидное следствие] → [итог для портфеля]"
-Пример: "Нефть $120 → (очевидно) дорогой бензин → (неочевидно) торговый баланс 
-         Японии рушится → Банк Японии продаёт трежерис США → доходности США растут → 
-         SPY и BTC падают даже если нефтяные компании в плюсе"
-Это "уууу"-факт который заставит читателя остановиться и подумать.
-
-1. Геополитика: эскалация = нефть/золото/доллар растут, крипта/акции ПАДАЮТ
-2. Инфляция > 4% = ФРС не снизит ставки = давление на рост-активы
-3. Fear&Greed < 20 ≠ автоматически точка входа (в 2022 был <20 десять месяцев подряд)
-4. Корреляции: нефть + доллар вместе = стагфляционный риск
-5. CPI это индекс, не процент. Пиши "инфляция ~3.2% годовых"
-
-ФОРМАТ КАЖДОГО РИСКА:
-"• [Риск]: [что наблюдаем] → [почему опасно + исторический пример]
-   Вероятность: ВЫСОКАЯ/СРЕДНЯЯ/НИЗКАЯ
-   Источник: [откуда данные]
-   Хедж: [конкретная мера]"
-
-⛔ ЖЁСТКИЕ ПРАВИЛА ФОРМАТА:
-- МАКСИМУМ 5 рисков. Не больше. Лучше 3 сильных чем 10 слабых.
-- Пиши ТОЛЬКО о макро-рисках: геополитика, инфляция, ставки, волатильность, корреляции.
-- ЗАПРЕЩЕНО писать о: отдельных акциях, локальных событиях, корпоративных новостях.
-- Если новость не влияет на широкий рынок — игнорируй её.
-
-ЗАПРЕЩЕНО:
-- Соглашаться с Bull без критики
-- Давать тот же итоговый вывод что и он
-- Выдумывать риски без источников
-- Писать раздел "Рекомендации" — только риски и хеджи
-- В первом раунде добавлять раздел "Ответ на аргументы Bull" — его ещё нет
-- Писать больше 5 пунктов рисков"""
-
-
-BEAR_COUNTER_SYSTEM = """Ты — Bear Skeptic, углубляешь свою позицию после верификации.
-
-ОБЯЗАТЕЛЬНО:
-1. Процитируй что сказал Bull в своём ответе — и опровергни это
-2. Используй выводы Verifier: если он нашёл ошибки у Bull — подчеркни это
-3. Добавь новые риски которые ты не упомянул в первом раунде
-
-"Bull ответил: '[цитата]'
-Это не меняет картины потому что: [контраргумент]"
-
-ПОМНИ: твоя задача не просто перечислить риски а ДОКАЗАТЬ что Bull ошибается.
-Используй исторические аналогии.
-
-ЗАПРЕЩЕНО:
-- Давать тот же вывод что Bull
-- Писать раздел "Сравнение с рынком", "ARK Invest говорит", "CoinDesk"
-- Писать раздел "Рекомендации" — только риски
-- Заканчивать нейтральным выводом — ты МЕДВЕЖИЙ аналитик"""
-
-
-VERIFIER_SYSTEM = """Ты — Data Verifier. Только факт-чек и логика. Никаких рекомендаций.
-
-ТВОЙ ЕДИНСТВЕННЫЙ ВЫХОД — эта структура, слово в слово:
-
----
-ШАГ 1: ЦИФРЫ
-[перечисли каждую цифру из дебатов]
-- [актив/показатель]: [значение] ✅/⚠️/❌
-
-ШАГ 2: ЛОГИКА
-Bull:
-- [аргумент коротко]: ✅ ВЕРНО / ⚠️ УПРОЩЕНИЕ ([почему, 1 строка]) / ❌ ОШИБКА ([почему])
-Bear:
-- [аргумент коротко]: ✅ ВЕРНО / ⚠️ УПРОЩЕНИЕ ([почему, 1 строка]) / ❌ ОШИБКА ([почему])
-
-⚠️ ОСОБО ПРОВЕРЯЙ ЛОГИЧЕСКИЕ КОРРЕЛЯЦИИ:
-Если агент использует рост Risk-off актива (золото, доллар, трежерис) как аргумент
-ЗА рост Risk-on актива (BTC, акции) — это ЛОГИЧЕСКАЯ ОШИБКА, ставь ❌ с пояснением:
-"❌ ЛОГИЧЕСКАЯ ОШИБКА: рост [золото/доллар] в условиях [геополитика/страх] = 
-   Risk-off сигнал, что давит на [BTC/акции], а не поддерживает их."
-
-ШАГ 3: СПОР
-Сравни ИТОГОВЫЕ ВЫВОДЫ Bull и Bear:
-- Bull итог: [одно слово — БЫЧИЙ/МЕДВЕЖИЙ/НЕЙТРАЛЬНЫЙ]
-- Bear итог: [одно слово — БЫЧИЙ/МЕДВЕЖИЙ/НЕЙТРАЛЬНЫЙ]
-- Если оба одинаковые → "⚠️ ОДИНАКОВЫЕ ВЫВОДЫ — спора нет"
-- Если разные → "✅ СПОР НАСТОЯЩИЙ — позиции противоположны"
-
-ШАГ 4: НЕИЗВЕСТНО
-❓ [что именно неизвестно, 1-2 строки]
-
-ШАГ 5: ФАКТЫ ДЛЯ SYNTH
-📌 3 самых важных подтверждённых факта:
-1. [факт + источник]
-2. [факт + источник]
-3. [факт + источник]
----
-
-⛔ АБСОЛЮТНО ЗАПРЕЩЕНО:
-- Писать "Ответ на аргументы оппонента"
-- Писать "Рекомендуем", "советуем", "следует"
-- Писать "Сравнение с рынком", "ARK Invest", "консенсус"
-- Выходить за рамки 5 шагов выше"""
-
-
-SYNTH_SYSTEM = """Ты — Consensus Synthesizer на Mistral. Думай цепочками рассуждений.
-
-Пользователь пришёл за честным анализом, не за красивым прогнозом.
-Твоя задача: прочитать весь спор и синтезировать — кто прав и почему.
-
-СНАЧАЛА ОЦЕНИ КАЧЕСТВО ДЕБАТОВ:
-- Спорили ли агенты по-настоящему или пришли к одинаковому выводу?
-- Если Verifier нашёл логические ошибки (❌) — обязательно учти их в синтезе
-- Если Verifier нашёл одинаковые выводы — скажи об этом прямо
-
-ИЕРАРХИЯ ФАКТОРОВ (важно для взвешивания аргументов):
-Макроэкономика > Геополитика > Технический анализ > Ончейн-метрики
-Это значит: если инфляция высокая и ФРС жёсткая — это перевешивает любой бычий ончейн-сигнал.
-Всегда явно указывай какой фактор имеет больший вес и почему.
-
-ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:
-
-🌍 КОНТЕКСТ (2-3 предложения)
-Только факты из данных. Инфляция = % годовых, не CPI индекс.
-
-📊 УРОВЕНЬ НЕОПРЕДЕЛЁННОСТИ: ВЫСОКИЙ / СРЕДНИЙ / НИЗКИЙ
-Объясни почему в 1-2 предложениях.
-
-⚔️ ИТОГ ДЕБАТОВ:
-Обязательно цитируй конкретные аргументы из дебатов.
-Явно укажи иерархию: какие аргументы весомее и почему.
-"Макро-аргумент Bear (инфляция 3.2%, нефть $94) имеет больший вес чем
- ончейн-аргумент Bull (Hash Rate, транзакции) — потому что макро определяет ликвидность."
-Главное противоречие которое осталось неразрешённым: [одно предложение]
-
-🌐 СРАВНЕНИЕ С КОНСЕНСУСОМ (только здесь, не у Bull/Bear):
-- ✅ или ⚠️ или ❓ по каждому ключевому тезису
-- Если рынок единодушен — это само по себе риск (contrarian signal)
-- НЕ упоминать ARK Invest — только реальные рыночные данные
-
-🎯 СЦЕНАРИИ С ДОКАЗАТЕЛЬСТВАМИ (только если данных достаточно):
-
-Для каждого сценария обязательно:
-1. Процент вероятности (строго на основе силы аргументов, не случайный)
-2. Факты ПОЧЕМУ этот сценарий реален прямо сейчас
-3. Что должно произойти чтобы он реализовался
-
-БАЗОВЫЙ (примерно X%):
-  Почему реален: [2-3 конкретных факта из данных]
-  Триггеры подтверждения: [что должно случиться]
-  Рынок: [конкретное движение]
-
-БЫЧИЙ (примерно Y%):
-  Почему реален: [факты в пользу бычьего]
-  Триггеры: [конкретно — цифры, события]
-  Рынок: рисковые активы РАСТУТ, защитные (золото) корректируются
-  Неочевидный индикатор: [что даст ранний сигнал]
-
-МЕДВЕЖИЙ (примерно Z%):
-  Почему реален: [факты в пользу медвежьего]
-  Триггеры: [конкретно — цифры, события]
-  Рынок: рисковые активы ПАДАЮТ, защитные (золото, доллар) РАСТУТ
-  Неочевидный индикатор: [что даст ранний сигнал]
-
-⚠️ РЕЧИ И ЗАЯВЛЕНИЯ ЛИДЕРОВ:
-Если в данных есть новости о заявлениях политиков/глав ЦБ — анализируй риторику:
-- "Ястребиная" риторика ФРС (инфляция, ставки) → давление на рынки
-- "Голубиная" риторика (поддержка экономики, снижение ставок) → рост рынков
-- Военная риторика лидеров → эскалационная премия в нефти/золоте
-- Торговые угрозы (пошлины, санкции) → валютные войны
-Укажи: "Риторика [лидер] — [ястребиная/голубиная/эскалационная] → 
-        вероятный эффект на [актив] в горизонте [период]"
-
-🔗 ЭФФЕКТЫ 2-ГО И 3-ГО ПОРЯДКА (ОБЯЗАТЕЛЬНЫЙ БЛОК):
-Это самый ценный раздел. Для каждого ключевого макро-события напиши цепочку неочевидных последствий.
-
-Структура:
-"📌 [Событие]
-→ Эффект 1-го порядка (очевидный): [что все знают]
-→ Эффект 2-го порядка (неочевидный): [что рынок ещё не заложил]
-→ Эффект 3-го порядка (глубокий): [что затронет смежные рынки]"
-
-Примеры правильного мышления:
-• Нефть $120 → (1й) дорогой бензин → (2й) торговый баланс Японии рушится → Банк Японии продаёт трежерис → (3й) доходности США растут → SPY и крипта падают
-• ФРС повышает ставки → (1й) доллар крепчает → (2й) развивающиеся рынки не могут обслуживать долларовые долги → (3й) дефолты EM → отток из всех рисковых активов включая BTC
-• Геополитика в Заливе → (1й) нефть растёт → (2й) авиакомпании режут маршруты → (3й) туризм и потребительский сектор падают → SPY вниз даже если нефтяные компании растут
-
-ЗАПРЕЩЕНО писать только очевидные эффекты. Минимум ОДИН эффект 2-го порядка для главного события дня.
-
-⛔ ЗАПРЕЩЕНО путать: "золото растёт" = МЕДВЕЖИЙ сигнал для BTC/акций, не бычий.
-⛔ ЗАПРЕЩЕНО писать раздел "СРАВНЕНИЕ С РЫНКОМ" дважды.
-
-💼 ПЛАН ДЕЙСТВИЙ (максимум 3 актива):
-
-⚠️ ЖЕЛЕЗНОЕ ПРАВИЛО RISK/REWARD:
-Минимальное соотношение Risk/Reward = 1:2 (цель минимум в 2 раза больше стопа).
-Пример верного: Вход $100, Цель +10% ($110), Стоп -5% ($95) → R/R = 1:2 ✅
-Пример неверного: Вход $100, Цель +7% ($107), Стоп -7% ($93) → R/R = 1:1 ❌ ЗАПРЕЩЕНО
-
-Если волатильность не позволяет поставить стоп для R/R 1:2 — пиши:
-  Направление: ВНЕ РЫНКА
-  Причина: волатильность слишком высокая для адекватного стопа
-⛔ НИКАКИХ ИСКЛЮЧЕНИЙ — ни для золота, ни для DXY, ни для "низковолатильных" активов.
-   Если R/R < 1:2 → только ВНЕ РЫНКА. Точка.
-   ЗАПРЕЩЕНО писать "приемлемо из-за низкой волатильности" или "близко к 1:2" — это нарушение.
-   1:1.5 = ЗАПРЕЩЕНО. 1:1.8 = ЗАПРЕЩЕНО. Только 1:2 и выше или ВНЕ РЫНКА.
-
-• Актив: [тикер]
-• Направление: LONG / SHORT / НАБЛЮДАТЬ / ВНЕ РЫНКА
-• Качество сигнала: СИЛЬНЫЙ / СЛАБЫЙ
-• Вход: [цена из данных]
-• Цель: [минимум +2X от стопа]
-• Стоп: [-X% от входа]
-• R/R: [соотношение, минимум 1:2]
-• Размер: не более [X]% портфеля
-• Горизонт: [период]
-
-🛡️ ЗАЩИТА: что делать если ошиблись (1-2 конкретных триггера)
-
-⚠️ ПРАВИЛО МЕЖРЫНОЧНЫХ КОРРЕЛЯЦИЙ ДЛЯ БЛОКА ЗАЩИТЫ:
-Падение рисковых активов (BTC, акции) = Risk-Off = защитные активы (золото, DXY) РАСТУТ.
-ЗАПРЕЩЕНО: "если BTC падает → продавай золото/DXY" — это логическая ошибка.
-ВЕРНО: "если BTC падает → золото и DXY держим или докупаем, выходим из рисковых позиций".
-
-⚠️ ЧЕСТНЫЙ ИТОГ (1 абзац):
-Если дебаты были слабыми — скажи прямо.
-Насколько можно доверять этому анализу сегодня?
-
----
-
-🗣 ПРОСТЫМИ СЛОВАМИ (обязательный финальный блок):
-После всего анализа напиши отдельный абзац под заголовком "🗣 ПРОСТЫМИ СЛОВАМИ:"
-Правила этого блока:
-- Пиши как будто объясняешь другу который никогда не торговал
-- ЗАПРЕЩЕНО: LONG, SHORT, R/R, DXY, Risk-off, хеджирование, волатильность — замени на человеческие слова
-- LONG = "покупать", SHORT = "продавать в расчёте на падение", ВНЕ РЫНКА = "лучше не лезть сейчас"
-- Конкретно скажи: стоит ли сейчас что-то покупать или лучше подождать и почему
-- Если есть триггеры — скажи их по-человечески: "если цена упадёт ниже X — продавай"
-- Объём: 3-5 предложений, не больше
-- Тон: дружеский, честный, без воды
-
-Пример хорошего блока:
-"🗣 ПРОСТЫМИ СЛОВАМИ:
-Сейчас рынок нервничает — война на Ближнем Востоке разгоняет нефть, а инфляция в США выше нормы.
-Биткоин застыл на месте и непонятно куда пойдёт. Если хочешь купить — подожди пока цена закрепится
-выше $72,000, это будет сигнал что рынок успокоился. Пока этого нет — лучше не лезть, держи деньги
-в кэше или золоте. Если уже держишь биткоин и он упадёт ниже $65,000 — подумай о продаже."
-
-ЗАПРЕЩЕНО:
-- Конкретные ценовые таргеты которых нет в данных
-- Вероятности без слова "примерно"
-- Писать "CPI 327.46" вместо "инфляция ~3.2% годовых"
-- Звучать уверенно когда данных недостаточно
-- R/R меньше 1:2 в торговом плане
-- Упоминать ARK Invest"""
-
-
-# ─── Базовый агент ────────────────────────────────────────────────────────────
-
-class BaseAgent:
-    def __init__(self, name: str, emoji: str, system_prompt: str, ai_method: str):
-        self.name = name
-        self.emoji = emoji
-        self.system_prompt = system_prompt
-        self.ai_method = ai_method
-
-    async def respond(
-        self,
-        news_context: str,
-        debate_history: DebateHistory,
-        round_num: int,
-        extra_instruction: str = ""
-    ) -> str:
-        history_ctx = debate_history.context_for_agent()
-
-        prompt = f"""КОНТЕКСТ И ДАННЫЕ:
-{news_context}
-
-ИСТОРИЯ ДЕБАТОВ (читай внимательно — ты должен отвечать на аргументы оппонента):
-{history_ctx}
-
-{f'ДОПОЛНИТЕЛЬНАЯ ИНСТРУКЦИЯ:{chr(10)}{extra_instruction}' if extra_instruction else ''}
-
-Сейчас РАУНД {round_num} из {DEBATE_ROUNDS}.
-Будь конкретен. Опирайся только на факты из данных выше.
-Обязательно отвечай на аргументы оппонента из истории дебатов."""
-
-        try:
-            caller = getattr(ai, self.ai_method)
-            response = await caller(prompt=prompt, system=self.system_prompt)
-            return response
-        except Exception as e:
-            logger.error(f"Agent {self.name} ({self.ai_method}) error: {e}")
-            return f"[Ошибка агента {self.name}: {e}]"
-
-
-# ─── Конкретные агенты ────────────────────────────────────────────────────────
-
-class BullResearcher(BaseAgent):
-    def __init__(self):
-        super().__init__(
-            name="Bull Researcher",
-            emoji="🐂",
-            system_prompt=BULL_SYSTEM,
-            ai_method="bull"
-        )
-
-    async def respond_counter(self, news_context: str, history: DebateHistory, round_num: int) -> str:
-        bear_args = history.last_message_by("Bear")
-        extra = (
-            f"Аргументы Bear которые ты ОБЯЗАН атаковать:\n{bear_args[:1500]}"
-            if bear_args else ""
-        )
-        self.system_prompt = BULL_COUNTER_SYSTEM
-        result = await self.respond(news_context, history, round_num, extra)
-        self.system_prompt = BULL_SYSTEM
-        return result
-
-
-class BearSkeptic(BaseAgent):
-    def __init__(self):
-        super().__init__(
-            name="Bear Skeptic",
-            emoji="🐻",
-            system_prompt=BEAR_SYSTEM,
-            ai_method="bear"
-        )
-
-    async def respond_counter(self, news_context: str, history: DebateHistory, round_num: int) -> str:
-        bull_counter = history.last_message_by("Bull")
-        verifier_notes = history.last_message_by("Verifier")
-        extra = ""
-        if bull_counter:
-            extra += f"Ответ Bull который ты ОБЯЗАН опровергнуть:\n{bull_counter[:1000]}\n\n"
-        if verifier_notes:
-            extra += f"Verifier нашёл эти проблемы — используй их против Bull:\n{verifier_notes[:800]}"
-        self.system_prompt = BEAR_COUNTER_SYSTEM
-        result = await self.respond(news_context, history, round_num, extra)
-        self.system_prompt = BEAR_SYSTEM
-        return result
-
-
-class DataVerifier(BaseAgent):
-    def __init__(self):
-        super().__init__(
-            name="Data Verifier",
-            emoji="🔍",
-            system_prompt=VERIFIER_SYSTEM,
-            ai_method="verifier"
-        )
-
-
-class ConsensusSynth(BaseAgent):
-    def __init__(self):
-        super().__init__(
-            name="Consensus Synthesizer",
-            emoji="⚖️",
-            system_prompt=SYNTH_SYSTEM,
-            ai_method="synth"
-        )
-
-
-# ─── Оркестратор дебатов ──────────────────────────────────────────────────────
-
-class DebateOrchestrator:
-    def __init__(self):
-        self.bull = BullResearcher()
-        self.bear = BearSkeptic()
-        self.verifier = DataVerifier()
-        self.synth = ConsensusSynth()
-
-    async def run_debate(
-        self,
-        news_context: str,
-        market_data: str = "",
-        custom_mode: bool = False,
-        live_prices: str = "",
-        profile_instruction: str = ""
-    ) -> str:
-        history = DebateHistory()
-        rounds = DEBATE_ROUNDS if not custom_mode else min(DEBATE_ROUNDS, 3)
-
-        logger.info(f"Запускаю дебаты v6.0: {rounds} раундов")
-
-        full_context = ""
-        if live_prices:
-            full_context += live_prices + "\n\n"
-        full_context += news_context
-        if market_data:
-            full_context += "\n\n" + market_data
-        if profile_instruction:
-            full_context += "\n\n" + profile_instruction
-
-        logger.info("Раунд 1: Bull и Bear независимо...")
-        empty_history = DebateHistory()
-        bull_r1, bear_r1 = await asyncio.gather(
-            self.bull.respond(full_context, empty_history, round_num=1),
-            self.bear.respond(full_context, empty_history, round_num=1)
-        )
-        history.add(f"{self.bull.emoji} {self.bull.name}", bull_r1, 1)
-        history.add(f"{self.bear.emoji} {self.bear.name}", bear_r1, 1)
-
-        if rounds >= 2:
-            logger.info("Раунд 2: Verifier + Bull контратака...")
-            verify_r2 = await self.verifier.respond(full_context, history, round_num=2)
-            history.add(f"{self.verifier.emoji} {self.verifier.name}", verify_r2, 2)
-            bull_r2 = await self.bull.respond_counter(full_context, history, round_num=2)
-            history.add(f"{self.bull.emoji} {self.bull.name}", bull_r2, 2)
-
-        if rounds >= 3:
-            logger.info("Раунд 3: Bear контратака + Synth синтез...")
-            bear_r3 = await self.bear.respond_counter(full_context, history, round_num=3)
-            history.add(f"{self.bear.emoji} {self.bear.name}", bear_r3, 3)
-
-        for extra_round in range(4, rounds + 1):
-            logger.info(f"Раунд {extra_round}: дополнительный спор...")
-            bull_x = await self.bull.respond_counter(full_context, history, extra_round)
-            history.add(f"{self.bull.emoji} {self.bull.name}", bull_x, extra_round)
-            bear_x = await self.bear.respond_counter(full_context, history, extra_round)
-            history.add(f"{self.bear.emoji} {self.bear.name}", bear_x, extra_round)
-
-        logger.info("Финальный синтез...")
-        final_synthesis = await self.synth.respond(full_context, history, round_num=rounds)
-
-        return self._format_report(history, final_synthesis, news_context, custom_mode)
-
-    def _format_report(
-        self,
-        history: DebateHistory,
-        synthesis: str,
-        news_context: str,
-        custom_mode: bool
-    ) -> str:
-        now = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-        if custom_mode:
-            title = "🔍 *АНАЛИЗ НОВОСТИ*"
-            news_section = (
-                f"*Анализируемый материал:*\n"
-                f"_{news_context[:200]}{'...' if len(news_context) > 200 else ''}_\n\n"
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+fetcher = NewsFetcher()
+storage = Storage()
+
+FREE_DAILY_LIMIT = 5
+
+scheduler: Scheduler = None
+
+# Хранилище дебатов для листания по кнопкам
+# {user_id: {"rounds": [...], "full_report": str}}
+debate_cache: dict = {}
+
+# Кэш РФ анализа (обновляется вместе с /daily)
+russia_cache: dict = {}  # {"report": str, "timestamp": str}
+
+
+# ─── Утилиты ──────────────────────────────────────────────────────────────────
+
+def clean_markdown(text: str) -> str:
+    lines = text.split("\n")
+    clean_lines = []
+    for line in lines:
+        if line.count("*") % 2 != 0:
+            line = line.replace("*", "")
+        if line.count("_") % 2 != 0:
+            line = line.replace("_", "")
+        if line.count("`") % 2 != 0:
+            line = line.replace("`", "")
+        clean_lines.append(line)
+    return "\n".join(clean_lines)
+
+
+def split_message(text: str, max_len: int = 3800) -> list:
+    text = clean_markdown(text)
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    while len(text) > max_len:
+        # Ищем последний перенос строки в пределах лимита
+        split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1 or split_at < max_len // 2:
+            # Если нет переноса — режем по пробелу
+            split_at = text.rfind(" ", 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        chunks.append(text[:split_at].rstrip())
+        text = text[split_at:].lstrip("\n ")
+    if text.strip():
+        chunks.append(text.strip())
+    return chunks
+
+
+async def check_limit(user_id: int) -> bool:
+    user = await get_user(user_id)
+    if not user:
+        return True
+    if user.get("tier") == "pro":
+        return True
+    return user.get("requests_today", 0) < FREE_DAILY_LIMIT
+
+
+def feedback_keyboard(report_type: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="👍 Полезно", callback_data=f"fb:1:{report_type}"),
+        InlineKeyboardButton(text="👎 Мимо",    callback_data=f"fb:-1:{report_type}"),
+    ]])
+
+
+def signal_to_stars(confidence) -> str:
+    mapping = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
+    if isinstance(confidence, str):
+        confidence = mapping.get(confidence.upper(), 0.5)
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.5
+    stars = max(1, min(5, round(confidence * 5)))
+    return "⭐" * stars + "☆" * (5 - stars)
+
+
+# ─── Парсинг отчёта на части ──────────────────────────────────────────────────
+
+def parse_report_parts(report: str) -> dict:
+    """
+    Разбивает полный отчёт на:
+    - header: шапка с датой и звёздами
+    - rounds: список раундов дебатов [раунд1, раунд2, раунд3]
+    - synthesis: итоговый синтез Synth
+    - disclaimer: нижний дисклеймер
+    """
+    parts = {
+        "header": "",
+        "rounds": [],
+        "synthesis": "",
+        "disclaimer": "",
+        "full": report
+    }
+
+    # Вытаскиваем дисклеймер — пробуем несколько вариантов маркера
+    for disc_marker in [
+        "─────────────────────────\n🤝 Честно о боте:",
+        "─────────────────────────\n🤝 *Честно о боте:*",
+        "🤝 Честно о боте:",
+        "🤝 *Честно о боте:*",
+    ]:
+        if disc_marker in report:
+            idx = report.find(disc_marker)
+            parts["disclaimer"] = report[idx:]
+            report = report[:idx]
+            break
+
+    # Вытаскиваем синтез — пробуем несколько вариантов маркера
+    for synth_marker in [
+        "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*",
+        "⚖️ ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ",
+        "ИТОГОВЫЙ СИНТЕЗ",
+    ]:
+        if synth_marker in report:
+            idx = report.find(synth_marker)
+            parts["synthesis"] = report[idx:].strip()
+            report = report[:idx]
+            break
+
+    # Вытаскиваем раунды
+    round_markers = [
+        "── Раунд 1:",
+        "── Раунд 2:",
+        "── Раунд 3:",
+    ]
+
+    debate_marker = "🗣 *ДЕБАТЫ АГЕНТОВ*"
+    if debate_marker in report:
+        debate_idx = report.find(debate_marker)
+        parts["header"] = report[:debate_idx].strip()
+        debate_section = report[debate_idx:]
+
+        # Разбиваем на раунды
+        current_round = ""
+        current_round_num = 0
+        for line in debate_section.split("\n"):
+            is_round_header = any(m in line for m in round_markers)
+            if is_round_header:
+                if current_round.strip() and current_round_num > 0:
+                    parts["rounds"].append(current_round.strip())
+                current_round = line + "\n"
+                current_round_num += 1
+            else:
+                current_round += line + "\n"
+
+        if current_round.strip() and current_round_num > 0:
+            parts["rounds"].append(current_round.strip())
+
+        if not parts["rounds"]:
+            parts["rounds"] = [debate_section]
+    else:
+        parts["header"] = report.strip()
+
+    return parts
+
+
+def build_short_report(parts: dict, stars: str, pct: int) -> list:
+    """
+    Возвращает СПИСОК сообщений для отправки.
+    Шапка с Bull/Bear кратко — первое сообщение.
+    Затем полный синтез режется на чанки.
+    Дисклеймер — последнее сообщение.
+    """
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Вытаскиваем Bull и Bear кратко из раунда 1
+    bull_summary = "Позиция бычья"
+    bear_summary = "Позиция медвежья"
+
+    if parts["rounds"]:
+        round1 = parts["rounds"][0]
+        lines = round1.split("\n")
+        bull_lines, bear_lines = [], []
+        in_bull = in_bear = False
+        for line in lines:
+            if "🐂 Bull" in line:
+                in_bull, in_bear = True, False
+                continue
+            if "🐻 Bear" in line:
+                in_bear, in_bull = True, False
+                continue
+            stripped = line.strip()
+            if not stripped or stripped.startswith("──"):
+                continue
+            if in_bull and len(bull_lines) < 3:
+                bull_lines.append(stripped)
+            elif in_bear and len(bear_lines) < 3:
+                bear_lines.append(stripped)
+        if bull_lines:
+            bull_summary = "\n".join(bull_lines)
+        if bear_lines:
+            bear_summary = "\n".join(bear_lines)
+
+    # Шапка — первое сообщение
+    header = (
+        f"📊 DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ\n"
+        f"🕐 {now}\n\n"
+        f"4 AI-модели изучили рынок и поспорили. Вот что вышло:\n\n"
+        f"Уровень сигнала: {stars} ({pct}% уверенности)\n"
+        f"Больше звёзд = данные чище и противоречивее\n\n"
+        f"{'─' * 30}\n\n"
+        f"🐂 Бычья позиция (кратко):\n{bull_summary}\n\n"
+        f"🐻 Медвежья позиция (кратко):\n{bear_summary}\n\n"
+        f"{'─' * 30}"
+    )
+
+    messages = [header]
+
+    # Синтез — режем на чанки по 3500 символов
+    synthesis = parts.get("synthesis", "").strip()
+    if synthesis:
+        for chunk in split_message(synthesis, max_len=3500):
+            messages.append(chunk)
+
+    # Дисклеймер — последнее сообщение
+    disclaimer = parts.get("disclaimer", "").strip()
+    if disclaimer:
+        messages.append(disclaimer)
+
+    return messages
+
+
+def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
+    """Клавиатура для листания раундов дебатов."""
+    buttons = []
+
+    nav_row = []
+    if round_idx > 0:
+        nav_row.append(InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"debate:{user_id}:{round_idx - 1}"
+        ))
+    nav_row.append(InlineKeyboardButton(
+        text=f"📄 {round_idx + 1}/{total_rounds}",
+        callback_data="debate:noop"
+    ))
+    if round_idx < total_rounds - 1:
+        nav_row.append(InlineKeyboardButton(
+            text="Вперёд ▶️",
+            callback_data=f"debate:{user_id}:{round_idx + 1}"
+        ))
+
+    buttons.append(nav_row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def main_report_keyboard(user_id: int, has_debates: bool = True) -> InlineKeyboardMarkup:
+    """Клавиатура под основным отчётом."""
+    buttons = []
+    if has_debates:
+        buttons.append([
+            InlineKeyboardButton(
+                text="📖 Полные дебаты агентов",
+                callback_data=f"debate:{user_id}:0"
             )
-        else:
-            title = "📊 *DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ*"
-            news_section = ""
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="👍 Полезно", callback_data=f"fb:1:daily"),
+        InlineKeyboardButton(text="👎 Мимо",    callback_data=f"fb:-1:daily"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-        honest_header = (
-            "💬 *Прежде чем читать:*\n"
-            "Это структурированный AI-анализ. 4 разные модели спорят между собой.\n"
-            "🐂 Bull = Groq/Llama | 🐻 Bear = Mistral | "
-            "🔍 Verifier = Llama | ⚖️ Synth = Mistral Large\n"
-            "Будущее неизвестно — это помощь в мышлении, не сигнал.\n"
+
+# ─── Обработчик листания дебатов ──────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("debate:"))
+async def handle_debate_page(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+
+    _, user_id_str, action = parts[0], parts[1], parts[2]
+    user_id = int(user_id_str)
+
+    if action == "noop":
+        await callback.answer()
+        return
+
+    round_idx = int(action)
+
+    # Берём дебаты из кэша
+    cache = debate_cache.get(user_id)
+    if not cache:
+        await callback.answer("❌ Дебаты устарели, запусти /daily заново")
+        return
+
+    rounds = cache["rounds"]
+    if round_idx >= len(rounds):
+        await callback.answer()
+        return
+
+    round_text = clean_markdown(rounds[round_idx])
+
+    # Если текст слишком длинный — режем
+    if len(round_text) > 4000:
+        round_text = round_text[:3900] + "\n\n_...сокращено..._"
+
+    kb = debates_keyboard(user_id, round_idx, len(rounds))
+
+    try:
+        await callback.message.edit_text(
+            round_text,
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+    except Exception:
+        # Если не получается edit — отправляем новое
+        await callback.message.answer(
+            round_text,
+            parse_mode="Markdown",
+            reply_markup=kb
         )
 
-        report_parts = [
-            title,
-            f"🕐 _{now}_",
-            "",
-            honest_header,
-            "─" * 30,
-            "",
+    await callback.answer()
+
+
+# ─── /start ───────────────────────────────────────────────────────────────────
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    await upsert_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.first_name or ""
+    )
+    name = message.from_user.first_name or "трейдер"
+    await message.answer(
+        f"👋 Привет, *{name}*!\n\n"
+        "🧠 *Dialectic Edge* — честный AI-аналитик рынков\n\n"
+        "4 агента спорят используя *живые данные*:\n"
+        "🐂 *Bull* — ищет возможности роста\n"
+        "🐻 *Bear* — указывает риски\n"
+        "🔍 *Verifier* — проверяет каждую цифру\n"
+        "⚖️ *Synth* — итог адаптированный под тебя\n\n"
+        "📋 *Команды:*\n"
+        "• /profile — настрой риск-профиль (важно сделать первым)\n"
+        "• /daily — дайджест рынков\n"
+        "• /analyze [текст] — анализ новости\n"
+        "• /trackrecord — история точности агентов\n"
+        "• /weeklyreport — отчёт за неделю\n"
+        "• /subscribe — авторассылка\n"
+        "• /markets — текущие цены\n"
+        "• /russia — анализ для российского рынка 🇷🇺\n\n"
+        "⚠️ _Не финансовый совет. Будущее неизвестно никому._",
+        parse_mode="Markdown"
+    )
+
+
+# ─── /profile ─────────────────────────────────────────────────────────────────
+
+@dp.message(Command("profile"))
+async def cmd_profile(message: Message):
+    user_id = message.from_user.id
+    await upsert_user(user_id)
+    profile = await get_profile(user_id)
+
+    risk_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🛡️ Консерватор", callback_data="profile:risk:conservative"),
+            InlineKeyboardButton(text="⚖️ Умеренный",   callback_data="profile:risk:moderate"),
+            InlineKeyboardButton(text="🚀 Агрессивный", callback_data="profile:risk:aggressive"),
+        ],
+        [
+            InlineKeyboardButton(text="⚡ Скальпинг", callback_data="profile:hz:scalp"),
+            InlineKeyboardButton(text="📈 Свинг",     callback_data="profile:hz:swing"),
+            InlineKeyboardButton(text="💎 Инвест",    callback_data="profile:hz:invest"),
+        ],
+        [
+            InlineKeyboardButton(text="₿ Крипта",    callback_data="profile:mkt:crypto"),
+            InlineKeyboardButton(text="📈 Акции",     callback_data="profile:mkt:stocks"),
+            InlineKeyboardButton(text="🌍 Всё",       callback_data="profile:mkt:all"),
+        ],
+    ])
+
+    await message.answer(
+        f"⚙️ *Настройка профиля*\n\n"
+        f"{format_profile_card(profile)}\n\n"
+        f"*Выбери параметры:*\n"
+        f"_Строка 1_ — риск-профиль\n"
+        f"_Строка 2_ — горизонт торговли\n"
+        f"_Строка 3_ — рынки\n\n"
+        f"Агенты адаптируют анализ под твои настройки.",
+        parse_mode="Markdown",
+        reply_markup=risk_kb
+    )
+
+
+@dp.callback_query(F.data.startswith("profile:"))
+async def handle_profile(callback: CallbackQuery):
+    _, param_type, value = callback.data.split(":")
+    user_id = callback.from_user.id
+    profile = await get_profile(user_id)
+
+    if param_type == "risk":
+        profile["risk"] = value
+    elif param_type == "hz":
+        profile["horizon"] = value
+    elif param_type == "mkt":
+        profile["markets"] = value
+
+    await save_profile(
+        user_id,
+        profile.get("risk", "moderate"),
+        profile.get("horizon", "swing"),
+        profile.get("markets", "all")
+    )
+
+    labels = {
+        "conservative": "🛡️ Консерватор", "moderate": "⚖️ Умеренный",
+        "aggressive": "🚀 Агрессивный",   "scalp": "⚡ Скальпинг",
+        "swing": "📈 Свинг",              "invest": "💎 Инвестиции",
+        "crypto": "₿ Крипта",             "stocks": "📈 Акции",
+        "all": "🌍 Все рынки",
+    }
+
+    await callback.answer(f"✅ Сохранено: {labels.get(value, value)}")
+    await callback.message.edit_text(
+        f"✅ *Профиль обновлён*\n\n{format_profile_card(profile)}\n\n"
+        f"Следующий анализ будет адаптирован под тебя.",
+        parse_mode="Markdown"
+    )
+
+
+# ─── Ядро анализа ─────────────────────────────────────────────────────────────
+
+async def run_full_analysis(
+    user_id: int,
+    custom_news: str = "",
+    custom_mode: bool = False
+) -> str:
+    tasks = [
+        fetcher.fetch_all(),
+        fetch_full_context(),
+        get_full_realtime_context(),
+        get_profile(user_id),
+        get_meta_context(),
+    ]
+
+    news, geo_context, (prices_dict, live_prices), profile, meta_context = await asyncio.gather(
+        *tasks, return_exceptions=True
+    )
+
+    if isinstance(news, Exception):         news = ""
+    if isinstance(geo_context, Exception):  geo_context = ""
+    if isinstance(live_prices, Exception):  live_prices = ""
+    if isinstance(profile, Exception):      profile = {"risk": "moderate", "horizon": "swing", "markets": "all"}
+    if isinstance(meta_context, Exception): meta_context = ""
+
+    profile_instruction = build_profile_instruction(profile)
+
+    if custom_mode and custom_news:
+        web_context = await search_news_context(custom_news)
+        news_context = (
+            f"ТЕМА АНАЛИЗА: {custom_news}\n\n"
+            f"{web_context}\n\n{geo_context}\n\n{meta_context}"
+        )
+    else:
+        news_context = (
+            f"{geo_context}\n\n=== НОВОСТИ ===\n{news}\n\n{meta_context}"
+        )
+
+    sentiment_result, confidence_instruction = analyze_and_filter(
+        news_context, str(live_prices)
+    )
+    sentiment_block = format_for_agents(sentiment_result, confidence_instruction)
+
+    logger.info(
+        f"Sentiment: {sentiment_result.label} | "
+        f"Confidence: {sentiment_result.confidence} | "
+        f"Score: {sentiment_result.score:+.2f}"
+    )
+
+    orchestrator = DebateOrchestrator()
+    report = await orchestrator.run_debate(
+        news_context=news_context,
+        live_prices=live_prices,
+        profile_instruction=profile_instruction + sentiment_block,
+        custom_mode=custom_mode
+    )
+
+    # ── Уровень сигнала ───────────────────────────────────────────────────────
+    _conf_raw = sentiment_result.confidence
+    _conf_map = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
+    if isinstance(_conf_raw, str):
+        _conf_num = _conf_map.get(_conf_raw.upper(), 0.5)
+    else:
+        try:
+            _conf_num = float(_conf_raw)
+        except (TypeError, ValueError):
+            _conf_num = 0.5
+
+    stars = signal_to_stars(_conf_num)
+    pct   = int(_conf_num * 100)
+
+    separator = "─" * 30 + "\n"
+    signal_line = (
+        f"📶 *Уровень сигнала:* {stars} ({pct}% уверенности)\n"
+        f"_Чем больше звёзд — тем чище и противоречивее данные для анализа_\n\n"
+    )
+    report = report.replace(separator, separator + signal_line, 1)
+
+    # ── Сохраняем прогнозы ────────────────────────────────────────────────────
+    source = custom_news[:300] if custom_mode else str(news)[:300]
+    await save_predictions_from_report(report, source_news=source)
+    await log_report(
+        user_id,
+        "analyze" if custom_mode else "daily",
+        source,
+        report[:500]
+    )
+
+    if not custom_mode:
+        storage.cache_report(report)
+        if scheduler is not None:
+            asyncio.create_task(scheduler.export_now())
+        # Кэшируем дайджест на GitHub для отслеживания точности (п.6)
+        try:
+            date_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+            asyncio.create_task(push_digest_cache(report, date_str))
+        except Exception as e:
+            logger.warning(f"Digest cache error: {e}")
+
+    return report
+
+
+# ─── /daily ───────────────────────────────────────────────────────────────────
+
+async def run_daily_analysis(user_id: int) -> str:
+    return await run_full_analysis(user_id)
+
+
+@dp.message(Command("daily"))
+async def cmd_daily(message: Message):
+    user_id = message.from_user.id
+    await upsert_user(user_id, message.from_user.username or "")
+
+    if not await check_limit(user_id):
+        await message.answer(
+            f"⛔ *Лимит* — {FREE_DAILY_LIMIT} запросов/день (free)\n"
+            "Попробуй завтра или /subscribe для авторассылки.",
+            parse_mode="Markdown"
+        )
+        return
+
+    cached = storage.get_cached_report()
+    if cached:
+        report = cached['report']
+        _conf_map = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
+        parts = parse_report_parts(report)
+        # Кэшируем раунды для листания
+        debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
+
+        messages = build_short_report(parts, "⭐⭐⭐⭐☆", 85)
+        for msg in messages:
+            await message.answer(msg)
+
+        await message.answer(
+            "Полный анализ выше",
+            reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
+        )
+        await message.answer(f"Кэш от {cached['timestamp']}. Новый через 2ч.")
+        return
+
+    wait_msg = await message.answer(
+        "⏳ *Запускаю анализ...*\n\n"
+        "🔄 Живые цены → новости → геополитика → дебаты агентов\n"
+        "_Займёт 2–5 минут..._",
+        parse_mode="Markdown"
+    )
+
+    try:
+        await increment_requests(user_id)
+        report = await run_daily_analysis(user_id)
+        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+
+        # Парсим отчёт на части
+        parts = parse_report_parts(report)
+
+        # Вычисляем звёзды из отчёта
+        stars_line = ""
+        pct_val = 85
+        if "Уровень сигнала" in report:
+            import re
+            m = re.search(r"Уровень сигнала.*?(\d+)%", report)
+            if m:
+                pct_val = int(m.group(1))
+        stars_str = signal_to_stars(pct_val / 100)
+
+        # Кэшируем раунды для кнопки
+        debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
+
+        messages = build_short_report(parts, stars_str, pct_val)
+        logger.info(f"Отправляю {len(messages)} сообщений. Размеры: {[len(m) for m in messages]}")
+        for i, msg in enumerate(messages):
+            logger.info(f"Отправляю чанк {i+1}/{len(messages)}, размер: {len(msg)}")
+            await message.answer(msg)
+
+        await message.answer(
+            "Полный анализ выше",
+            reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
+        )
+
+    except Exception as e:
+        logger.error(f"Daily error: {e}", exc_info=True)
+        await bot.edit_message_text(
+            f"❌ *Ошибка:* `{str(e)[:200]}`\n\n"
+            "Проверь: API ключи, интернет, BOT_TOKEN.",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+
+
+# ─── /analyze ─────────────────────────────────────────────────────────────────
+
+@dp.message(Command("analyze"))
+async def cmd_analyze(message: Message):
+    user_id = message.from_user.id
+    await upsert_user(user_id, message.from_user.username or "")
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "❗ *Укажи новость для анализа*\n\n"
+            "Примеры:\n"
+            "`/analyze Fed снизил ставку до 4.25%`\n"
+            "`/analyze Binance заморозила вывод в США`\n"
+            "`/analyze Китай ограничил экспорт редкоземельных металлов`",
+            parse_mode="Markdown"
+        )
+        return
+
+    if not await check_limit(user_id):
+        await message.answer(
+            f"⛔ *Лимит* — {FREE_DAILY_LIMIT} запросов/день (free)",
+            parse_mode="Markdown"
+        )
+        return
+
+    user_news = parts[1].strip()
+    wait_msg = await message.answer(
+        f"🔍 *Анализирую:*\n_{user_news[:150]}_\n\n"
+        "⏳ Ищу контекст + запускаю дебаты...",
+        parse_mode="Markdown"
+    )
+
+    try:
+        await increment_requests(user_id)
+        report = await run_full_analysis(user_id, custom_news=user_news, custom_mode=True)
+        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+
+        report_parts = parse_report_parts(report)
+        debate_cache[user_id] = {"rounds": report_parts["rounds"], "full": report}
+
+        pct_val = 85
+        import re
+        m = re.search(r"Уровень сигнала.*?(\d+)%", report)
+        if m:
+            pct_val = int(m.group(1))
+        stars_str = signal_to_stars(pct_val / 100)
+
+        short = build_short_report(report_parts, stars_str, pct_val)
+        chunks = split_message(short)
+        for chunk in chunks[:-1]:
+            await message.answer(chunk, parse_mode="Markdown")
+        await message.answer(
+            chunks[-1],
+            parse_mode="Markdown",
+            reply_markup=main_report_keyboard(user_id, has_debates=bool(report_parts["rounds"]))
+        )
+
+    except Exception as e:
+        logger.error(f"Analyze error: {e}", exc_info=True)
+        await bot.edit_message_text(
+            f"❌ *Ошибка:* `{str(e)[:200]}`",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+
+
+
+# ─── /russia ──────────────────────────────────────────────────────────────────
+
+@dp.message(Command("russia"))
+async def cmd_russia(message: Message):
+    user_id = message.from_user.id
+    await upsert_user(user_id, message.from_user.username or "")
+
+    if not await check_limit(user_id):
+        await message.answer(
+            f"⛔ *Лимит* — {FREE_DAILY_LIMIT} запросов/день (free)",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Проверяем кэш РФ (живёт 2 часа как основной)
+    import time
+    now_ts = time.time()
+    if russia_cache.get("report") and (now_ts - russia_cache.get("ts", 0)) < 7200:
+        cached_ru = russia_cache["report"]
+        for chunk in split_message(cached_ru):
+            await message.answer(chunk, parse_mode="Markdown")
+        await message.answer(
+            f"📦 _Кэш от {russia_cache['timestamp']}. Новый через 2ч._",
+            parse_mode="Markdown",
+            reply_markup=feedback_keyboard("russia")
+        )
+        return
+
+    # Нужен глобальный анализ как основа
+    global_report = ""
+    cached = storage.get_cached_report()
+    if cached:
+        global_report = cached["report"]
+    else:
+        global_report = "Глобальный анализ пока не готов. Запусти /daily сначала."
+
+    # Если нет кэша /daily — предлагаем выбор
+    if not storage.get_cached_report():
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="✅ Сначала запущу /daily",
+                callback_data="russia_choice:daily"
+            ),
+            InlineKeyboardButton(
+                text="🚀 Запустить сейчас",
+                callback_data="russia_choice:now"
+            ),
+        ]])
+        await message.answer(
+            "💡 *Совет перед запуском /russia:*\n\n"
+            "Глобальный дайджест (/daily) даёт агентам полный контекст рынков.\n"
+            "Без него анализ будет работать только на РФ данных.\n\n"
+            "*Что делаем?*",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+        return
+
+    wait_msg = await message.answer(
+        "🇷🇺 *Запускаю анализ для России...*\n\n"
+        "🔄 ЦБ РФ → Мосбиржа → РБК → Llama агенты → Mistral синтез\n"
+        "_Займёт 1–3 минуты..._",
+        parse_mode="Markdown"
+    )
+
+    try:
+        await increment_requests(user_id)
+
+        # Собираем РФ данные
+        russia_context = await fetch_russia_context()
+
+        # Запускаем диалектический анализ
+        report = await run_russia_analysis(global_report, russia_context)
+
+        # Кэшируем
+        from datetime import datetime
+        import time
+        russia_cache["report"]    = report
+        russia_cache["timestamp"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        russia_cache["ts"]        = time.time()
+
+        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+
+        for chunk in split_message(report):
+            await message.answer(chunk, parse_mode="Markdown")
+
+        await message.answer(
+            "💬 *Был ли анализ полезным?*",
+            parse_mode="Markdown",
+            reply_markup=feedback_keyboard("russia")
+        )
+
+    except Exception as e:
+        logger.error(f"Russia error: {e}", exc_info=True)
+        await bot.edit_message_text(
+            f"❌ *Ошибка:* `{str(e)[:200]}`",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+
+
+
+# ─── Выбор перед /russia ──────────────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("russia_choice:"))
+async def handle_russia_choice(callback: CallbackQuery):
+    action = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    if action == "daily":
+        await callback.answer()
+        await callback.message.answer(
+            "✅ Отличный выбор! Запускай /daily — после него /russia выдаст максимум.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # action == "now" — запускаем сразу
+    await callback.answer("🚀 Запускаю!")
+
+    wait_msg = await callback.message.answer(
+        "🇷🇺 *Запускаю анализ для России...*\n\n"
+        "🔄 ЦБ РФ → Мосбиржа → РБК → Llama агенты → Mistral синтез\n"
+        "_Займёт 1–3 минуты..._",
+        parse_mode="Markdown"
+    )
+
+    try:
+        await increment_requests(user_id)
+        global_report = "Глобальный анализ не запускался. Работаю только на данных РФ."
+        russia_context = await fetch_russia_context()
+        report = await run_russia_analysis(global_report, russia_context)
+
+        import time
+        russia_cache["report"]    = report
+        russia_cache["timestamp"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        russia_cache["ts"]        = time.time()
+
+        await bot.delete_message(
+            chat_id=callback.message.chat.id,
+            message_id=wait_msg.message_id
+        )
+
+        for chunk in split_message(report):
+            await callback.message.answer(chunk, parse_mode="Markdown")
+
+        await callback.message.answer(
+            "💬 *Был ли анализ полезным?*",
+            parse_mode="Markdown",
+            reply_markup=feedback_keyboard("russia")
+        )
+
+    except Exception as e:
+        logger.error(f"Russia choice error: {e}", exc_info=True)
+        await bot.edit_message_text(
+            f"❌ *Ошибка:* `{str(e)[:200]}`",
+            chat_id=callback.message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+
+
+# ─── /markets ─────────────────────────────────────────────────────────────────
+
+@dp.message(Command("markets"))
+async def cmd_markets(message: Message):
+    await upsert_user(message.from_user.id)
+    wait_msg = await message.answer("⏳ Загружаю живые данные...")
+    try:
+        _, live_prices = await get_full_realtime_context()
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        safe_prices = clean_markdown(live_prices)
+        await bot.edit_message_text(
+            f"📊 *РЫНКИ — {now}*\n\n{safe_prices}",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await bot.edit_message_text(
+            f"❌ Ошибка: {e}",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id
+        )
+
+
+# ─── /trackrecord ─────────────────────────────────────────────────────────────
+
+@dp.message(Command("trackrecord"))
+async def cmd_trackrecord(message: Message):
+    await upsert_user(message.from_user.id)
+    try:
+        data     = await get_track_record()
+        stats    = data["stats"]
+        recent   = data["recent"]
+        by_asset = data["by_asset"]
+
+        total   = stats.get("total") or 0
+        wins    = stats.get("wins") or 0
+        losses  = stats.get("losses") or 0
+        pending = stats.get("pending") or 0
+        avg_pnl = stats.get("avg_pnl") or 0
+        best    = stats.get("best_call") or 0
+        worst   = stats.get("worst_call") or 0
+
+        if total == 0:
+            await message.answer(
+                "📊 *Track Record*\n\n"
+                "_Прогнозы накапливаются. Запусти /daily — агенты начнут делать прогнозы._\n\n"
+                "Через 1-2 недели активного использования здесь появится реальная статистика.",
+                parse_mode="Markdown"
+            )
+            return
+
+        finished  = wins + losses
+        winrate   = (wins / finished * 100) if finished > 0 else 0
+        wr_emoji  = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
+        pnl_emoji = "🟢" if avg_pnl >= 0 else "🔴"
+
+        lines = [
+            "📊 *TRACK RECORD АГЕНТОВ*\n",
+            f"*Всего прогнозов:* {total}",
+            f"*Завершено:* {finished} | ⏳ Ждут: {pending}",
         ]
 
-        if news_section:
-            report_parts.append(news_section)
+        if finished > 0:
+            lines += [
+                f"*Winrate:* {wr_emoji} *{winrate:.0f}%* ({wins}✅ / {losses}❌)",
+                f"*Средний P&L:* {pnl_emoji} *{avg_pnl:+.1f}%*",
+            ]
+            if best:               lines.append(f"*Лучший:* 🚀 +{best:.1f}%")
+            if worst and worst < 0: lines.append(f"*Худший:* 💥 {worst:.1f}%")
 
-        report_parts.append("🗣 *ДЕБАТЫ АГЕНТОВ*\n")
+        if by_asset:
+            lines.append("\n*🏆 Топ активов:*")
+            for a in by_asset[:3]:
+                wr = (a['wins'] / a['calls'] * 100) if a['calls'] else 0
+                lines.append(
+                    f"• {a['asset']}: {wr:.0f}% winrate "
+                    f"({a['calls']} сигналов, avg {a['avg_pnl']:+.1f}%)"
+                )
 
-        current_round = 0
-        for msg in history.messages:
-            if msg.round_num != current_round:
-                current_round = msg.round_num
-                round_labels = {
-                    1: "── Раунд 1: Первичные позиции ──",
-                    2: "── Раунд 2: Верификация + Контратака ──",
-                    3: "── Раунд 3: Углубление спора ──",
-                }
-                label = round_labels.get(current_round, f"── Раунд {current_round} ──")
-                report_parts.append(f"\n*{label}*\n")
-            report_parts.append(f"{msg.agent}:\n{msg.content}\n")
+        if recent:
+            lines.append("\n*📋 Последние сигналы:*")
+            for r in recent[:5]:
+                emoji = "✅" if r["result"] == "win" else "❌"
+                pnl   = r.get("pnl_pct") or 0
+                lines.append(
+                    f"{emoji} {r['asset']} {r['direction']} "
+                    f"→ *{pnl:+.1f}%* _{(r.get('created_at') or '')[:10]}_"
+                )
 
-        report_parts.append("─" * 30)
-        report_parts.append("⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*\n")
-        report_parts.append(synthesis)
-        report_parts.append(DISCLAIMER)
+        lines.append(
+            "\n⚠️ _Прошлые результаты не гарантируют будущих. Не финансовый совет._"
+        )
+        await message.answer("\n".join(lines), parse_mode="Markdown")
 
-        return "\n".join(str(p) for p in report_parts)
+    except Exception as e:
+        logger.error(f"Trackrecord error: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+# ─── /weeklyreport ────────────────────────────────────────────────────────────
+
+@dp.message(Command("weeklyreport"))
+async def cmd_weekly(message: Message):
+    await upsert_user(message.from_user.id)
+    wait_msg = await message.answer("⏳ Формирую отчёт за неделю...")
+    try:
+        report = await build_weekly_report()
+        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        await message.answer(report, parse_mode="Markdown")
+    except Exception as e:
+        await bot.edit_message_text(
+            f"❌ Ошибка: {e}",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id
+        )
+
+
+# ─── /subscribe ───────────────────────────────────────────────────────────────
+
+@dp.message(Command("subscribe"))
+async def cmd_subscribe(message: Message):
+    user_id   = message.from_user.id
+    await upsert_user(user_id)
+    user      = await get_user(user_id)
+    is_subbed = user.get("daily_sub", 0) if user else 0
+    sub_time  = user.get("sub_time", "08:00") if user else "08:00"
+    parts     = message.text.split()
+
+    if len(parts) == 1:
+        status = f"✅ Активна (каждый день в *{sub_time} UTC*)" if is_subbed else "❌ Отключена"
+        await message.answer(
+            f"📬 *Авторассылка*\nСтатус: {status}\n\n"
+            f"• `/subscribe on` — включить в 08:00 UTC\n"
+            f"• `/subscribe on 09:30` — своё время\n"
+            f"• `/subscribe off` — отключить",
+            parse_mode="Markdown"
+        )
+        return
+
+    action   = parts[1].lower()
+    time_str = parts[2] if len(parts) > 2 else "08:00"
+    try:
+        h, m = time_str.split(":")
+        assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+        time_str = f"{int(h):02d}:{int(m):02d}"
+    except Exception:
+        await message.answer("❌ Формат: HH:MM, например `08:30`", parse_mode="Markdown")
+        return
+
+    if action == "on":
+        await set_daily_sub(user_id, True, time_str)
+        await message.answer(
+            f"✅ *Подписка активна*\nКаждый день в *{time_str} UTC*\n\n"
+            f"Отключить: `/subscribe off`",
+            parse_mode="Markdown"
+        )
+    elif action == "off":
+        await set_daily_sub(user_id, False)
+        await message.answer("❌ *Подписка отключена*", parse_mode="Markdown")
+
+
+# ─── /stats ───────────────────────────────────────────────────────────────────
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    user_id = message.from_user.id
+    await upsert_user(user_id)
+    user    = await get_user(user_id)
+    profile = await get_profile(user_id)
+
+    if not user:
+        await message.answer("Ошибка загрузки.")
+        return
+
+    fb           = await get_feedback_stats()
+    total_fb     = fb.get("total") or 0
+    pos_fb       = fb.get("positive") or 0
+    satisfaction = (pos_fb / total_fb * 100) if total_fb > 0 else 0
+
+    risk_name    = RISK_PROFILES.get(profile.get("risk", "moderate"), {}).get("name", "⚖️ Умеренный")
+    horizon_name = HORIZONS.get(profile.get("horizon", "swing"), {}).get("name", "📈 Свинг")
+
+    tr      = await get_track_record()
+    tr_s    = tr["stats"]
+    tr_wins = tr_s.get("wins") or 0
+    tr_loss = tr_s.get("losses") or 0
+    tr_wr   = (tr_wins / (tr_wins + tr_loss) * 100) if (tr_wins + tr_loss) > 0 else 0
+
+    await message.answer(
+        f"📈 *Моя статистика*\n\n"
+        f"*Tier:* {'👑 PRO' if user.get('tier')=='pro' else '🆓 Free'}\n"
+        f"*Запросов сегодня:* {user.get('requests_today',0)}/{FREE_DAILY_LIMIT}\n"
+        f"*Запросов всего:* {user.get('requests_total',0)}\n"
+        f"*Профиль:* {risk_name} | {horizon_name}\n"
+        f"*Подписка:* {'✅' if user.get('daily_sub') else '❌'}\n\n"
+        f"*🎯 Track Record бота:*\n"
+        f"Прогнозов: {tr_s.get('total',0)} | Winrate: {tr_wr:.0f}%\n\n"
+        f"*Оценки пользователей:*\n"
+        f"Оценок: {total_fb} | Позитивных: {satisfaction:.0f}%\n\n"
+        f"• /trackrecord — полная история точности\n"
+        f"• /weeklyreport — отчёт за неделю\n"
+        f"• /profile — изменить профиль",
+        parse_mode="Markdown"
+    )
+
+
+# ─── /help ────────────────────────────────────────────────────────────────────
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    await upsert_user(message.from_user.id)
+    await message.answer(
+        "📖 *Dialectic Edge v6.0*\n\n"
+        "*Что нового в v6:*\n"
+        "• Один отчёт вместо 6 сообщений\n"
+        "• Кнопка 📖 Полные дебаты — листай раунды\n"
+        "• Простой язык в выводах\n"
+        "• Умный Risk/Reward — если риск высокий, бот честно скажет 'ВНЕ РЫНКА'\n\n"
+        "*Команды:*\n"
+        "• `/profile` — настрой риск-профиль первым\n"
+        "• `/daily` — дайджест рынков\n"
+        "• `/analyze [текст]` — анализ новости\n"
+        "• `/markets` — живые цены\n"
+        "• `/trackrecord` — история точности\n"
+        "• `/weeklyreport` — отчёт за неделю\n"
+        "• `/subscribe on 08:00` — авторассылка\n"
+        "• `/russia` — анализ для российского рынка 🇷🇺\n"
+        "• `/stats` — твоя статистика\n\n"
+        "⚠️ _Не финансовый совет. Будущее неизвестно никому._",
+        parse_mode="Markdown"
+    )
+
+
+# ─── /admin ───────────────────────────────────────────────────────────────────
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    stats    = await get_admin_stats()
+    fb       = await get_feedback_stats()
+    tr       = await get_track_record()
+    tr_stats = tr["stats"]
+    wins     = tr_stats.get("wins") or 0
+    losses   = tr_stats.get("losses") or 0
+    winrate  = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+
+    await message.answer(
+        f"🔧 *ADMIN*\n\n"
+        f"👥 Пользователи: {stats['total_users']} | Активных: {stats['active_week']}\n"
+        f"📬 Подписчики: {stats['subscribers']}\n"
+        f"📊 Запросов: {stats['total_reports']}\n\n"
+        f"👍 Фидбек: {fb.get('positive',0)}+ / {fb.get('negative',0)}-\n\n"
+        f"🎯 Track Record:\n"
+        f"Прогнозов: {tr_stats.get('total',0)} | Winrate: {winrate:.0f}%\n"
+        f"Avg P&L: {(tr_stats.get('avg_pnl') or 0):+.1f}%",
+        parse_mode="Markdown"
+    )
+
+
+# ─── Фидбек ───────────────────────────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("fb:"))
+async def handle_feedback(callback: CallbackQuery):
+    _, rating_str, report_type = callback.data.split(":")
+    await save_feedback(callback.from_user.id, report_type, int(rating_str))
+    emoji = "🙏 Спасибо!" if int(rating_str) == 1 else "📝 Учтём!"
+    await callback.answer(emoji)
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+
+# ─── Запуск ───────────────────────────────────────────────────────────────────
+
+async def main():
+    global scheduler
+
+    await init_db()
+    await init_profiles_table()
+    logger.info("🚀 Dialectic Edge v6.0 starting...")
+
+    scheduler = Scheduler(
+        bot=bot,
+        send_daily_fn=run_daily_analysis,
+        check_predictions_fn=check_pending_predictions
+    )
+
+    await asyncio.gather(
+        dp.start_polling(bot),
+        scheduler.start()
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
