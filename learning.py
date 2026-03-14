@@ -2,10 +2,13 @@
 learning.py — Агенты учатся на своих ошибках.
 Безопасный модуль: если таблица predictions ещё не создана — просто молча пропускает.
 """
+import aiosqlite
 import logging
-from database import get_db_connection
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+DB_PATH = "dialectic.db"  # Путь к БД (как в остальном проекте)
 
 
 def classify_error(pred: dict) -> str:
@@ -64,39 +67,35 @@ async def get_recent_lessons(days: int = 14) -> str:
     Если таблицы predictions нет — возвращает пустую строку (без ошибок!).
     """
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # ВАЖНО: используем 'status', как в tracker.py
-        cursor.execute("""
-            SELECT asset, direction, pnl_pct, status, created_at
-            FROM predictions 
-            WHERE status = 'loss' 
-            AND datetime(created_at) >= datetime('now', '-' || ? || ' days')
-            AND pnl_pct IS NOT NULL
-            ORDER BY pnl_pct ASC
-            LIMIT 10
-        """, (days,))
-        
-        losses = cursor.fetchall()
-        conn.close()
-        
-        if not losses:
-            return ""
-        
-        result = "\n\n🧠 НЕДАВНИЕ УРОКИ (учти в анализе):\n"
-        for i, row in enumerate(losses[:5], 1):
-            asset, direction, pnl, status, created = row
-            pred = {"asset": asset, "direction": direction, "pnl_pct": pnl}
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT asset, direction, pnl_pct, status, created_at
+                FROM predictions 
+                WHERE status = 'loss' 
+                AND datetime(created_at) >= datetime('now', '-' || ? || ' days')
+                AND pnl_pct IS NOT NULL
+                ORDER BY pnl_pct ASC
+                LIMIT 10
+            """, (days,))
             
-            error_type = classify_error(pred)
-            lesson = generate_lesson(pred, error_type)
+            losses = await cursor.fetchall()
             
-            if lesson:
-                result += f"{i}. {lesson}\n"
-        
-        logger.info(f"📚 Агенты получили {len(losses)} уроков за {days} дней")
-        return result
+            if not losses:
+                return ""
+            
+            result = "\n\n🧠 НЕДАВНИЕ УРОКИ (учти в анализе):\n"
+            for i, row in enumerate(losses[:5], 1):
+                asset, direction, pnl, status, created = row
+                pred = {"asset": asset, "direction": direction, "pnl_pct": pnl}
+                
+                error_type = classify_error(pred)
+                lesson = generate_lesson(pred, error_type)
+                
+                if lesson:
+                    result += f"{i}. {lesson}\n"
+            
+            logger.info(f"📚 Агенты получили {len(losses)} уроков за {days} дней")
+            return result
         
     except Exception as e:
         # Таблицы ещё нет? Норм, просто пропускаем
@@ -109,36 +108,33 @@ async def analyze_errors_for_report(days: int = 30) -> dict:
     Возвращает статистику ошибок для /trackrecord или админки.
     """
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT asset, direction, pnl_pct, status
-            FROM predictions 
-            WHERE status = 'loss'
-            AND datetime(created_at) >= datetime('now', '-' || ? || ' days')
-        """, (days,))
-        
-        errors = cursor.fetchall()
-        conn.close()
-        
-        stats = {}
-        for asset, direction, pnl, status in errors:
-            error_type = classify_error({"asset": asset, "direction": direction, "pnl_pct": pnl})
-            key = error_type or "unknown"
-            if key not in stats:
-                stats[key] = {"count": 0, "avg_pnl": 0, "assets": []}
-            stats[key]["count"] += 1
-            stats[key]["avg_pnl"] += pnl
-            if asset not in stats[key]["assets"]:
-                stats[key]["assets"].append(asset)
-        
-        # Считаем среднее
-        for s in stats.values():
-            if s["count"] > 0:
-                s["avg_pnl"] /= s["count"]
-        
-        return stats
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT asset, direction, pnl_pct, status
+                FROM predictions 
+                WHERE status = 'loss'
+                AND datetime(created_at) >= datetime('now', '-' || ? || ' days')
+            """, (days,))
+            
+            errors = await cursor.fetchall()
+            
+            stats = {}
+            for asset, direction, pnl, status in errors:
+                error_type = classify_error({"asset": asset, "direction": direction, "pnl_pct": pnl})
+                key = error_type or "unknown"
+                if key not in stats:
+                    stats[key] = {"count": 0, "avg_pnl": 0, "assets": []}
+                stats[key]["count"] += 1
+                stats[key]["avg_pnl"] += pnl
+                if asset not in stats[key]["assets"]:
+                    stats[key]["assets"].append(asset)
+            
+            # Считаем среднее
+            for s in stats.values():
+                if s["count"] > 0:
+                    s["avg_pnl"] /= s["count"]
+            
+            return stats
         
     except Exception as e:
         logger.debug(f"Error analysis: {e}")
