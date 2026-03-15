@@ -151,11 +151,15 @@ def parse_report(report: str) -> dict:
     """Разбивает полный отчёт на части для UX."""
     parts = {"rounds": [], "synthesis": "", "disclaimer": "", "full": report}
 
-    # Дисклеймер
-    for marker in ["─────────────────────────\n🤝 Честно о боте:",
-                   "🤝 Честно о боте:", "🤝 *Честно о боте:*"]:
+    # Дисклеймер — ищем ТОЛЬКО по тексту, без разделителя
+    # (разделители встречаются внутри синтеза и не должны его обрезать)
+    for marker in ["🤝 Честно о боте:", "🤝 *Честно о боте:*"]:
         if marker in report:
             idx = report.find(marker)
+            # Берём разделитель перед дисклеймером если он есть
+            sep_before = report.rfind("─────────────────────────", 0, idx)
+            if sep_before != -1 and idx - sep_before < 5:
+                idx = sep_before
             parts["disclaimer"] = report[idx:]
             report = report[:idx]
             break
