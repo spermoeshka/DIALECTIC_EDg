@@ -240,26 +240,27 @@ def extract_verdict(synthesis: str) -> str:
             parts.append(chunk.strip())
             break
 
-    # Блок 2: Простыми словами (всегда добавляем если есть)
-    for m in ["🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ"]:
-        if m in synthesis:
-            idx   = synthesis.find(m)
-            chunk = synthesis[idx:idx + 1200]
-            # Останавливаемся на дисклеймере
-            for stop in ["⚠️ Не является", "─────────────────────────",
-                         "🏆 ВЕРДИКТ"]:
-                pos = chunk.find(stop, 10)
-                if pos != -1:
-                    chunk = chunk[:pos]
-                    break
-            parts.append(chunk.strip())
-            break
-
     if parts:
         return "\n\n".join(parts)
 
     # Fallback
     return synthesis[:600].strip()
+
+
+def extract_simple_words(synthesis: str) -> str:
+    """Извлекает блок ПРОСТЫМИ СЛОВАМИ отдельно."""
+    for m in ["🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ"]:
+        if m in synthesis:
+            idx   = synthesis.find(m)
+            chunk = synthesis[idx:idx + 1200]
+            for stop in ["⚠️ Не является", "─────────────────────────",
+                         "🏆 ВЕРДИКТ", "💎 ЖЁСТКИЙ"]:
+                pos = chunk.find(stop, 10)
+                if pos != -1:
+                    chunk = chunk[:pos]
+                    break
+            return chunk.strip()
+    return ""
 
 
 def extract_plan(synthesis: str) -> str:
@@ -301,9 +302,10 @@ def build_digest(parts: dict, stars: str, pct: int) -> str:
         bull_text = extract_short_position(r1, "🐂")
         bear_text = extract_short_position(r1, "🐻")
 
-    # Вердикт и план из синтеза
-    verdict = extract_verdict(parts["synthesis"]) if parts["synthesis"] else ""
-    plan    = extract_plan(parts["synthesis"])    if parts["synthesis"] else ""
+    # Вердикт, простыми словами и план из синтеза
+    verdict      = extract_verdict(parts["synthesis"])      if parts["synthesis"] else ""
+    simple_words = extract_simple_words(parts["synthesis"]) if parts["synthesis"] else ""
+    plan         = extract_plan(parts["synthesis"])         if parts["synthesis"] else ""
 
     lines = [
         "📊 DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ",
@@ -326,6 +328,10 @@ def build_digest(parts: dict, stars: str, pct: int) -> str:
 
     if plan:
         lines += ["─" * 30, "", plan, ""]
+
+    # Простыми словами — всегда в конце перед дисклеймером
+    if simple_words:
+        lines += ["─" * 30, "", simple_words, ""]
 
     lines += [
         "─" * 30,
