@@ -215,30 +215,47 @@ def extract_short_position(round1: str, agent_emoji: str) -> str:
 
 
 def extract_verdict(synthesis: str) -> str:
-    """Извлекает блок ВЕРДИКТ СУДЬИ или Простыми словами из синтеза."""
+    """
+    Извлекает ВЕРДИКТ СУДЬИ + ПРОСТЫМИ СЛОВАМИ из синтеза.
+    Оба блока важны — вердикт даёт позицию, простыми словами даёт понимание.
+    """
+    parts = []
+
+    # Блок 1: Вердикт судьи
     for m in ["🏆 ВЕРДИКТ СУДЬИ", "ВЕРДИКТ СУДЬИ"]:
         if m in synthesis:
             idx   = synthesis.find(m)
-            chunk = synthesis[idx:idx + 800]
+            chunk = synthesis[idx:idx + 600]
+            # Берём до плана действий или честного итога
             for stop in ["💼 ПЛАН ДЕЙСТВИЙ", "⚠️ ЧЕСТНЫЙ ИТОГ",
-                         "🗣 ПРОСТЫМИ СЛОВАМИ"]:
+                         "🗣 ПРОСТЫМИ СЛОВАМИ", "─────────────────"]:
                 pos = chunk.find(stop, 10)
                 if pos != -1:
                     chunk = chunk[:pos]
                     break
-            return chunk.strip()
-    # Fallback — блок Простыми словами (всегда есть в синтезе)
+            parts.append(chunk.strip())
+            break
+
+    # Блок 2: Простыми словами (всегда добавляем если есть)
     for m in ["🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ"]:
         if m in synthesis:
             idx   = synthesis.find(m)
-            chunk = synthesis[idx:idx + 2000]
-            for stop in ["⚠️ Не является", "─────────────────────────"]:
+            chunk = synthesis[idx:idx + 1200]
+            # Останавливаемся на дисклеймере
+            for stop in ["⚠️ Не является", "─────────────────────────",
+                         "🏆 ВЕРДИКТ"]:
                 pos = chunk.find(stop, 10)
                 if pos != -1:
                     chunk = chunk[:pos]
                     break
-            return chunk.strip()
-    return synthesis[:500].strip()
+            parts.append(chunk.strip())
+            break
+
+    if parts:
+        return "\n\n".join(parts)
+
+    # Fallback
+    return synthesis[:600].strip()
 
 
 def extract_plan(synthesis: str) -> str:
