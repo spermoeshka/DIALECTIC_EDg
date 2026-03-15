@@ -379,25 +379,48 @@ def generate_russia_chart(russia_report: str) -> io.BytesIO | None:
 
 
 def _parse_russia_items(text: str, marker: str) -> list[dict]:
-    """Парсит возможности/риски из Russia Edge отчёта."""
+    """
+    Парсит возможности (🟢) или риски (🔴) из Russia Edge отчёта.
+    marker = "🟢" для возможностей, "🔴" для рисков.
+    Берём только блок между нужным маркером и следующим разделом.
+    """
     import re as _re
     items = []
     rating_map = {"ВЫСОКАЯ": 3, "СРЕДНЯЯ": 2, "НИЗКАЯ": 1}
-    lines = text.split("\n")
+
+    # Находим нужный блок по маркеру
+    start = text.find(marker)
+    if start == -1:
+        return items
+
+    # Находим конец блока — следующий маркер другого типа или итог
+    other_marker = "🔴" if marker == "🟢" else "🟢"
+    end_markers = [other_marker, "🇷🇺 ИТОГ", "──────"]
+    end = len(text)
+    for em in end_markers:
+        pos = text.find(em, start + 5)
+        if pos != -1 and pos < end:
+            end = pos
+
+    block = text[start:end]
+    lines = block.split("\n")
     current_name = None
+
     for line in lines:
         line = line.strip()
         if line.startswith("•") and len(line) > 5:
-            # Чистим markdown *, **, _ из названий
             raw_name = line.lstrip("• ").split("\n")[0][:50]
             raw_name = _re.sub(r"[*_`]", "", raw_name).strip()
-            current_name = raw_name[:28]  # обрезаем для графика
+            current_name = raw_name[:28]
         if current_name and ("Уверенность:" in line or "Вероятность:" in line):
             for key, val in rating_map.items():
                 if key in line:
-                    items.append({"name": current_name, "rating": val})
+                    # Пропускаем низкую уверенность — слабые сигналы не нужны
+                    if val >= 2:
+                        items.append({"name": current_name, "rating": val})
                     current_name = None
                     break
+
     return items
 
 
