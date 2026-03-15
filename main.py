@@ -231,7 +231,7 @@ def extract_verdict(synthesis: str) -> str:
     for m in ["🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ"]:
         if m in synthesis:
             idx   = synthesis.find(m)
-            chunk = synthesis[idx:idx + 900]
+            chunk = synthesis[idx:idx + 2000]
             for stop in ["⚠️ Не является", "─────────────────────────"]:
                 pos = chunk.find(stop, 10)
                 if pos != -1:
