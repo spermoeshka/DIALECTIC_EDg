@@ -229,8 +229,9 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
                  fontsize=8, color=COLORS["subtext"], fontweight="bold")
         ax3.text(0.78, y, "24ч",    transform=ax3.transAxes,
                  fontsize=8, color=COLORS["subtext"], fontweight="bold")
-        ax3.axhline(y=y - 0.04, xmin=0, xmax=1, color=COLORS["border"],
-                    linewidth=0.5, transform=ax3.transAxes)
+        # axhline не поддерживает transform — рисуем линию через plot в осевых координатах
+        ax3.plot([0, 1], [y - 0.04, y - 0.04], color=COLORS["border"],
+                 linewidth=0.5, transform=ax3.transAxes, clip_on=False)
 
         for i, (name, price_str, chg_str, c) in enumerate(rows):
             yi = y - 0.16 - i * 0.16
@@ -243,22 +244,22 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
 
         # ── 4. Уровень сигнала + Fear&Greed ───────────────────────────────────
         ax4 = fig.add_subplot(gs[1, 1])
-        ax4.set_title("Индикаторы", color=COLORS["text"],
-                      fontsize=10, pad=8)
+        ax4.set_title("Индикаторы", color=COLORS["text"], fontsize=10, pad=8)
+        # Используем обычную систему координат данных (не transAxes) для barh
+        ax4.set_xlim(0, 100)
+        ax4.set_ylim(0, 3)
         ax4.axis("off")
 
-        # Уровень сигнала — бар
+        # Уровень сигнала (y=2.4)
         signal_color = (COLORS["bull"] if pct >= 60 else
                         COLORS["bear"] if pct <= 35 else
                         COLORS["gold"])
-        ax4.barh([0.8], [pct], height=0.15, color=signal_color,
-                 transform=ax4.transAxes)
-        ax4.barh([0.8], [100 - pct], left=[pct], height=0.15,
-                 color=COLORS["border"], transform=ax4.transAxes)
-        ax4.text(0.0, 0.9, f"Уровень сигнала: {pct}%",
-                 transform=ax4.transAxes, fontsize=8.5, color=COLORS["text"])
+        ax4.barh([2.4], [pct],       height=0.3, color=signal_color, left=0)
+        ax4.barh([2.4], [100 - pct], height=0.3, color=COLORS["border"], left=pct)
+        ax4.text(0, 2.75, f"Уровень сигнала: {pct}%",
+                 fontsize=8.5, color=COLORS["text"])
 
-        # Fear & Greed
+        # Fear & Greed (y=1.5)
         macro = prices.get("MACRO", {})
         fng   = macro.get("fng", {}) if isinstance(macro, dict) else {}
         fv    = fng.get("val", "N/A")
@@ -267,27 +268,22 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
             fng_color = (COLORS["bear"] if fv <= 25 else
                          COLORS["bull"] if fv >= 60 else
                          COLORS["gold"])
-            ax4.barh([0.55], [fv], height=0.15, color=fng_color,
-                     transform=ax4.transAxes)
-            ax4.barh([0.55], [100 - fv], left=[fv], height=0.15,
-                     color=COLORS["border"], transform=ax4.transAxes)
-            ax4.text(0.0, 0.66, f"Fear & Greed: {fv}/100 ({fs})",
-                     transform=ax4.transAxes, fontsize=8.5, color=COLORS["text"])
+            ax4.barh([1.5], [fv],       height=0.3, color=fng_color, left=0)
+            ax4.barh([1.5], [100 - fv], height=0.3, color=COLORS["border"], left=fv)
+            ax4.text(0, 1.85, f"Fear & Greed: {fv}/100 ({fs})",
+                     fontsize=8.5, color=COLORS["text"])
 
-        # VIX
+        # VIX (y=0.6)
         if "VIX" in prices:
-            vix_val = prices["VIX"]["price"]
+            vix_val   = prices["VIX"]["price"]
             vix_color = (COLORS["bear"] if vix_val > 30 else
                          COLORS["gold"] if vix_val > 20 else
                          COLORS["bull"])
-            ax4.text(0.0, 0.38, f"VIX: {vix_val:.2f}",
-                     transform=ax4.transAxes, fontsize=8.5, color=vix_color,
-                     fontweight="bold")
-            vix_label = ("🔴 Высокая волатильность" if vix_val > 30 else
-                         "🟡 Умеренная" if vix_val > 20 else
-                         "🟢 Низкая волатильность")
-            ax4.text(0.0, 0.25, vix_label, transform=ax4.transAxes,
-                     fontsize=7.5, color=COLORS["subtext"])
+            vix_label = ("Высокая волатильность" if vix_val > 30 else
+                         "Умеренная" if vix_val > 20 else
+                         "Низкая волатильность")
+            ax4.text(0, 0.9, f"VIX: {vix_val:.2f} — {vix_label}",
+                     fontsize=8.5, color=vix_color, fontweight="bold")
 
         # Дисклеймер внизу
         fig.text(0.5, 0.01,
