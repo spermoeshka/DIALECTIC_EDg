@@ -60,7 +60,7 @@ from user_profile import (
 from weekly_report import build_weekly_report
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
-from github_export import export_to_github, push_digest_cache
+from github_export import export_to_github, push_digest_cache, get_previous_digest
 from learning import get_recent_lessons
 from chart_generator import generate_main_chart, generate_russia_chart, is_available as charts_ok
 
@@ -393,9 +393,11 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
         get_full_realtime_context(),
         get_profile(user_id),
         get_meta_context(),
+        get_previous_digest(),   # прошлый анализ для сравнения
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    news, geo, realtime_result, profile, meta = results
+    news, geo, realtime_result, profile, meta, prev_digest = results
+    if isinstance(prev_digest, Exception): prev_digest = ""
 
     # Безопасная распаковка realtime — если упало, не крашим всё
     if isinstance(realtime_result, Exception):
@@ -426,6 +428,11 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
                     f"{web_ctx}\n\n{geo}\n\n{meta}\n\n{tavily_news}")
     else:
         news_ctx = (f"{geo}\n\n=== НОВОСТИ ===\n{news}\n\n{meta}\n\n{tavily_news}")
+
+    # Добавляем прошлый анализ в контекст — агенты сравнивают с реальностью
+    if prev_digest and not custom_mode:
+        news_ctx += f"\n\n{prev_digest}"
+        logger.info("📚 Прошлый анализ передан агентам для сравнения")
 
     sentiment_result, confidence_instr = analyze_and_filter(news_ctx, str(live_prices))
     sentiment_block = format_for_agents(sentiment_result, confidence_instr)
