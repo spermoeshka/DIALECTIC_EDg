@@ -18,3 +18,5 @@ aiosqlite==0.20.0
 
 # Переменные окружения
 python-dotenv==1.0.1
+
+matplotlib        
