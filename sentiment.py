@@ -29,7 +29,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 HF_TOKEN   = os.getenv("HF_TOKEN", "")
-HF_API_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert/pipeline/text-classification"
 TIMEOUT    = aiohttp.ClientTimeout(total=15)
 
 # Максимум заголовков на один запрос (экономим лимит 1000/день)
