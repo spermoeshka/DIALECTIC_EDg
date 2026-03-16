@@ -87,74 +87,58 @@ def _ru_to_en(text: str) -> str:
 
 def _extract_headlines(text: str) -> list[str]:
     """
-    Умное извлечение заголовков из новостного текста.
+    Извлекает заголовки из текста новостей.
 
-    Логика приоритетов:
-    1. Строки после "•" или "-" в начале — это заголовки новостей
-    2. Строки после "===" секций — первая строка секции = заголовок
-    3. Короткие предложения (15-120 символов) — вероятно заголовки
-    4. Длинные строки (120-300) — тело новости, берём только если мало заголовков
+    Реальный формат из news_fetcher:
+        === АКТУАЛЬНЫЕ НОВОСТИ ===
+        --- Yahoo Finance ---
+        • Fed holds rates steady
+          Summary: ...
+        --- Cointelegraph ---
+        • Bitcoin holds above $74K
 
-    Так FinBERT получает именно заголовки, а не тело статей.
+    Строки с • = заголовки новостей (приоритет 1).
     """
-    headlines   = []   # приоритет 1: явные заголовки (• или -)
-    short_lines = []   # приоритет 2: короткие строки
-    long_lines  = []   # приоритет 3: длинные строки (запасной вариант)
+    headlines  = []   # буллеты • — заголовки новостей
+    short_lines = []  # короткие строки без буллетов
+    long_lines  = []  # длинные строки (запасной)
 
-    lines = text.split("\n")
-    prev_was_section = False
+    skip_prefixes = [
+        "http", "источник:", "source:", "summary:", "уверенность",
+        "вероятность", "хедж:", "📊", "🐂", "🐻", "⚠️",
+        "источников:", "новостей:", "tavily", "===", "---",
+    ]
+    skip_words = [
+        "summary", "источник", "вероятность", "хедж",
+        "уверенность", "направление", "горизонт", "как действовать",
+    ]
 
-    for line in lines:
+    for line in text.split("\n"):
         raw = line.strip()
-        if not raw:
+        if not raw or len(raw) < 12:
             continue
 
-        # Секция-заголовок (===, ---) — следующая строка будет важной
-        if raw.startswith("===") or raw.startswith("---"):
-            prev_was_section = True
-            continue
-
-        # Убираем markdown и технические символы
         clean = re.sub(r"[*_`#\[\]()]", "", raw).strip()
-        clean = re.sub(r"^[•\-–—]+\s*", "", clean).strip()  # убираем буллеты
+        cl    = clean.lower()
 
-        if not clean or len(clean) < 12:
-            prev_was_section = False
+        if any(cl.startswith(p.lower()) for p in skip_prefixes):
+            continue
+        if any(w in cl for w in skip_words):
             continue
 
-        # Пропускаем технические строки
-        if any(clean.startswith(p) for p in [
-            "http", "источник", "source", "📊", "🐂", "🐻", "⚠️",
-            "уверенность", "вероятность", "хедж", "источник:",
-        ]):
-            prev_was_section = False
-            continue
-
-        # Приоритет 1: строки-буллеты из новостей (оригинал начинается с • или -)
-        if raw.startswith("•") or raw.startswith("-") or raw.startswith("–"):
-            if 15 <= len(clean) <= 200:
-                headlines.append(clean)
-
-        # Приоритет 1б: строка сразу после секции
-        elif prev_was_section and 15 <= len(clean) <= 200:
-            headlines.append(clean)
-
-        # Приоритет 2: короткие строки — скорее всего заголовки
+        # Приоритет 1: буллет • = заголовок новости
+        if raw.startswith("•") or raw.startswith("– ") or raw.startswith("- "):
+            title = re.sub(r"^[•–\-]+\s*", "", clean).strip()
+            if 15 <= len(title) <= 200:
+                headlines.append(title)
         elif 15 <= len(clean) <= 120:
             short_lines.append(clean)
-
-        # Приоритет 3: длинные строки — тело новости
         elif 120 < len(clean) <= 300:
             long_lines.append(clean)
 
-        prev_was_section = False
-
-    # Собираем итоговый список: сначала явные заголовки, потом короткие, потом длинные
     result = []
     seen   = set()
-
     for line in headlines + short_lines + long_lines:
-        # Дедупликация похожих заголовков (первые 40 символов)
         key = line[:40].lower()
         if key not in seen:
             seen.add(key)
@@ -164,8 +148,6 @@ def _extract_headlines(text: str) -> list[str]:
 
     return result
 
-
-# ─── FinBERT через HF Inference API ──────────────────────────────────────────
 
 async def _finbert_score(headlines: list[str]) -> list[dict] | None:
     """
