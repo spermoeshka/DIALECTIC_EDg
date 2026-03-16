@@ -173,14 +173,36 @@ async def _finbert_score(headlines: list[str]) -> list[dict] | None:
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # HF возвращает [[{label, score}, ...], ...]
-                    # Нормализуем в [{positive, negative, neutral}, ...]
+                    logger.debug(f"FinBERT raw response type: {type(data)}, len: {len(data) if isinstance(data, list) else 'N/A'}")
+
                     results = []
-                    for item in data:
-                        scores = {d["label"].lower(): d["score"] for d in item}
-                        results.append(scores)
+
+                    # HF может возвращать разные форматы:
+                    # Формат 1 (батч): [[{label,score},...], [{label,score},...]]
+                    # Формат 2 (один): [{label,score}, {label,score}]
+                    # Формат 3 (router): [{label,score,score,...}] с top_k
+
+                    if isinstance(data, list) and len(data) > 0:
+                        first = data[0]
+
+                        if isinstance(first, list):
+                            # Формат 1: батч — список списков
+                            for item in data:
+                                scores = {d["label"].lower(): d["score"] for d in item}
+                                results.append(scores)
+
+                        elif isinstance(first, dict) and "label" in first:
+                            # Формат 2: один заголовок — плоский список
+                            # Это значит батч не сработал, обрабатываем как один
+                            scores = {d["label"].lower(): d["score"] for d in data}
+                            results.append(scores)
+                            logger.warning("FinBERT вернул один результат — батч не сработал")
+
+                        else:
+                            logger.warning(f"FinBERT неизвестный формат: {str(data)[:200]}")
+
                     logger.info(f"✅ FinBERT: обработано {len(results)} заголовков")
-                    return results
+                    return results if results else None
 
                 elif resp.status == 503:
                     # Модель загружается — нормально при первом запросе
