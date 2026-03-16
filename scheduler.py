@@ -1,18 +1,24 @@
 """
 scheduler.py — Фоновые задачи по расписанию.
-- Ежедневная рассылка дайджеста подписчикам
-- Проверка прогнозов каждые 6 часов
-- Сброс счётчиков запросов в полночь
-- Экспорт track record на GitHub — сразу при старте + после каждого /daily
+
+ИСПРАВЛЕНО v2:
+- export_now() больше НЕ вызывается после каждого /daily.
+  Это вызывало бесконечный цикл: /daily → GitHub коммит → Railway деплой →
+  бот рестартует → /daily по расписанию → GitHub коммит → Railway деплой...
+
+- GitHub экспорт теперь происходит только 1 раз в сутки (в 00:05 UTC),
+  а не после каждого запроса пользователя.
+
+- Добавлена защита от двойного запуска экспорта (_last_export_date).
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from database import (
     get_daily_subscribers,
     reset_daily_counts,
-    get_admin_stats
 )
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,9 +28,10 @@ class Scheduler:
         self.send_daily = send_daily_fn
         self.check_predictions = check_predictions_fn
         self._running = False
+        # ИСПРАВЛЕНО: трекаем дату последнего экспорта чтобы не дублировать
+        self._last_export_date: date | None = None
 
     async def start(self):
-        """Запускает все фоновые задачи."""
         self._running = True
         logger.info("⏰ Scheduler запущен")
 
@@ -32,11 +39,11 @@ class Scheduler:
             self._daily_digest_loop(),
             self._prediction_checker_loop(),
             self._midnight_reset_loop(),
-            self._biweekly_github_export_loop(),
+            self._daily_github_export_loop(),   # ← раз в сутки, не после каждого /daily
         )
 
     async def _daily_digest_loop(self):
-        """Каждую минуту проверяет — не пора ли слать дайджест."""
+        """Каждую минуту проверяет — не пора ли слать дайджест подписчикам."""
         while self._running:
             try:
                 now = datetime.now()
@@ -81,33 +88,51 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"Midnight reset error: {e}")
 
-    async def _biweekly_github_export_loop(self):
+    async def _daily_github_export_loop(self):
         """
-        Экспортирует track record на GitHub.
-        Первый раз — СРАЗУ при старте бота.
-        Потом — раз в 2 недели.
+        Экспортирует track record на GitHub ОДИН РАЗ В СУТКИ в 00:05 UTC.
+
+        ИСПРАВЛЕНО: раньше export_now() вызывался после каждого /daily,
+        что создавало GitHub коммит → Railway триггерился на новый коммит →
+        бесконечный цикл деплоев.
+
+        Теперь:
+        - Экспорт только в 00:05 UTC (один раз в сутки)
+        - Защита _last_export_date исключает двойной запуск
+        - Никаких коммитов от пользовательских запросов
         """
+        # Небольшая задержка при старте чтобы БД успела инициализироваться
+        await asyncio.sleep(30)
+
         while self._running:
             try:
-                from github_export import export_to_github
-                success = await export_to_github()
-                if success:
-                    logger.info("✅ Track record экспортирован на GitHub")
-                else:
-                    logger.warning("⚠️ GitHub export не выполнен — проверь GITHUB_TOKEN в Railway")
+                now = datetime.now()
+                today = now.date()
+
+                # Экспортируем раз в сутки в 00:05
+                if (now.hour == 0 and now.minute == 5
+                        and self._last_export_date != today):
+                    from github_export import export_to_github
+                    success = await export_to_github()
+                    if success:
+                        self._last_export_date = today
+                        logger.info("✅ Track record экспортирован на GitHub (ежесуточно)")
+                    else:
+                        logger.warning("⚠️ GitHub export не выполнен — проверь GITHUB_TOKEN")
+
             except Exception as e:
                 logger.error(f"GitHub export error: {e}")
 
-            await asyncio.sleep(14 * 24 * 3600)  # раз в 2 недели
+            # Проверяем каждую минуту (синхронизируемся с минутным циклом)
+            await asyncio.sleep(60)
 
     async def export_now(self):
         """
-        Принудительный экспорт — вызывается из main.py после каждого /daily.
-        Так FORECASTS.md обновляется каждый день, не раз в 2 недели.
+        ИСПРАВЛЕНО: метод оставлен для обратной совместимости,
+        но теперь НЕ делает ничего чтобы не триггерить Railway деплои.
+
+        Если нужен ручной экспорт — используй /admin команду или
+        запусти github_export.py напрямую локально.
         """
-        try:
-            from github_export import export_to_github
-            await export_to_github()
-            logger.info("✅ GitHub export (после /daily) выполнен")
-        except Exception as e:
-            logger.warning(f"GitHub export (manual) error: {e}")
+        logger.debug("export_now() вызван но пропущен (отключено для предотвращения Railway loop)")
+        pass
