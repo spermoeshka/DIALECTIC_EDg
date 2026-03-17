@@ -35,6 +35,58 @@ from data_sources import fetch_full_context
 from web_search import get_full_realtime_context, search_news_context, get_news_context
 from meta_analyst import get_meta_context
 from sentiment import analyze_and_filter_async, format_for_agents
+import sentiment as _sentiment_module
+
+# ═══ HOTFIX: FinBERT одиночные запросы ═══════════════════════════════════════
+# Railway закэшировал старый sentiment.py где батч всегда возвращал 1 результат.
+# Этот патч встроен в main.py и перезаписывает _finbert_score напрямую.
+
+import aiohttp as _aiohttp
+import asyncio as _asyncio
+
+async def _finbert_single_hotfix(headline, session, headers):
+    try:
+        async with session.post(
+            _sentiment_module.HF_API_URL,
+            json={"inputs": headline},
+            headers=headers,
+            timeout=_sentiment_module.TIMEOUT
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    if isinstance(data[0], dict) and "label" in data[0]:
+                        return {d["label"].lower(): d["score"] for d in data}
+                    elif isinstance(data[0], list):
+                        return {d["label"].lower(): d["score"] for d in data[0]}
+    except Exception:
+        pass
+    return None
+
+async def _finbert_score_hotfix(headlines):
+    import logging
+    _log = logging.getLogger("sentiment_hotfix")
+    if not _sentiment_module.HF_TOKEN:
+        return None
+    en = [_sentiment_module._ru_to_en(h) for h in headlines]
+    headers = {
+        "Authorization": f"Bearer {_sentiment_module.HF_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    # Сразу одиночные запросы — батч не работает на HF router
+    _log.info(f"HOTFIX FinBERT: отправляю {min(len(en),10)} одиночных запросов...")
+    async with _aiohttp.ClientSession() as session:
+        tasks = [_finbert_single_hotfix(h, session, headers) for h in en[:10]]
+        results = await _asyncio.gather(*tasks)
+    good = [r for r in results if r is not None]
+    _log.info(f"HOTFIX FinBERT: {len(good)}/{min(len(en),10)} успешно")
+    return good if good else None
+
+# Применяем патч
+_sentiment_module._finbert_score = _finbert_score_hotfix
+import logging as _logging
+_logging.getLogger(__name__).info("✅ HOTFIX sentiment._finbert_score применён — одиночные запросы активны")
+# ═══════════════════════════════════════════════════════════════════════════════
 from agents import DebateOrchestrator
 from storage import Storage
 from database import (
@@ -319,9 +371,14 @@ def build_digest(parts: dict, stars: str, pct: int) -> str:
         lines += ["", verdict, ""]
     if plan:
         lines += ["─" * 30, "", plan, ""]
-    # ИСПРАВЛЕНО v7.1: показываем только если не дублирует вердикт
-    if simple_words and simple_words[:60] not in verdict:
-        lines += ["─" * 30, "", simple_words, ""]
+    # ИСПРАВЛЕНО v7.2: отрезаем вердикт из блока "простыми словами" если он туда попал
+    if simple_words:
+        sw_clean = simple_words
+        for vmarker in ["🏆 ВЕРДИКТ СУДЬИ", "🏆 ВЕРДИКТ", "ВЕРДИКТ СУДЬИ"]:
+            if vmarker in sw_clean:
+                sw_clean = sw_clean[:sw_clean.find(vmarker)].strip()
+        if sw_clean and len(sw_clean) > 50:
+            lines += ["─" * 30, "", sw_clean, ""]
 
     lines += [
         "─" * 30,
