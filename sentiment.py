@@ -25,7 +25,7 @@ logger.info("🔬 sentiment.py v4 loaded — single requests enabled")
 
 HF_TOKEN   = os.getenv("HF_TOKEN", "")
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert/pipeline/text-classification"
-TIMEOUT    = aiohttp.ClientTimeout(total=45)
+TIMEOUT    = aiohttp.ClientTimeout(total=90)  # увеличено для одиночных запросов
 
 MAX_HEADLINES = 15
 
@@ -156,7 +156,7 @@ async def _finbert_score(headlines: list[str]) -> list[dict] | None:
         async with aiohttp.ClientSession() as session:
             tasks = [
                 _finbert_single(h, session, headers)
-                for h in en_headlines[:10]  # макс 10 чтобы не спамить API
+                for h in en_headlines[:8]  # макс 8 — больше шансов набрать 3+ для MEDIUM confidence
             ]
             raw_results = await asyncio.gather(*tasks)
 
