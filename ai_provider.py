@@ -36,6 +36,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
+GROQ_API_KEY_2     = os.getenv("GROQ_API_KEY_2", "")  # второй аккаунт — автопереключение при 429
 GROQ_URL           = "https://api.groq.com/openai/v1/chat/completions"
 
 
@@ -138,17 +139,38 @@ async def _call_openai_style(
 # ── Конкретные провайдеры ──────────────────────────────────────────────────────
 
 async def _call_groq(prompt: str, system: str, temperature: float, model: str = None, agent_key: str = None) -> str:
-    if not GROQ_API_KEY:
+    """
+    Пробует GROQ_API_KEY, при 429 автоматически переключается на GROQ_API_KEY_2.
+    """
+    if not GROQ_API_KEY and not GROQ_API_KEY_2:
         raise ValueError("Нет GROQ_API_KEY")
+
     m = model or "llama-3.3-70b-versatile"
-    result = await _call_openai_style(
-        GROQ_URL, GROQ_API_KEY, m,
-        prompt, system, temperature, "Groq",
-        agent_key=agent_key
-    )
-    if agent_key:
-        _track_model(agent_key, "Groq", m)
-    return result
+
+    keys_to_try = []
+    if GROQ_API_KEY:   keys_to_try.append(("Groq#1", GROQ_API_KEY))
+    if GROQ_API_KEY_2: keys_to_try.append(("Groq#2", GROQ_API_KEY_2))
+
+    last_err = None
+    for key_name, key in keys_to_try:
+        try:
+            result = await _call_openai_style(
+                GROQ_URL, key, m,
+                prompt, system, temperature, key_name,
+                agent_key=agent_key
+            )
+            if agent_key:
+                _track_model(agent_key, key_name, m)
+            logger.info(f"Groq {key_name} ✅")
+            return result
+        except RuntimeError as e:
+            if "429" in str(e):
+                logger.warning(f"{key_name} лимит исчерпан, пробую следующий ключ...")
+                last_err = e
+                continue
+            raise  # другие ошибки пробрасываем сразу
+
+    raise RuntimeError(f"Все Groq ключи исчерпаны. Последняя ошибка: {last_err}")
 
 
 async def _call_mistral(prompt: str, system: str, temperature: float, model: str = None, agent_key: str = None) -> str:
@@ -277,7 +299,7 @@ async def _call_best_available(prompt: str, system: str, temperature: float, age
     """
     providers = []
 
-    if GROQ_API_KEY:
+    if GROQ_API_KEY or GROQ_API_KEY_2:
         providers.append(("Groq/Llama",
             lambda p, s, t: _call_groq(p, s, t, agent_key=agent_name)))
 
