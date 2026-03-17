@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 HF_TOKEN   = os.getenv("HF_TOKEN", "")
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert/pipeline/text-classification"
-TIMEOUT    = aiohttp.ClientTimeout(total=15)
+TIMEOUT    = aiohttp.ClientTimeout(total=45)  # увеличено: модель на HF "спит" и просыпается ~20-30 сек
 
 MAX_HEADLINES = 15
 
