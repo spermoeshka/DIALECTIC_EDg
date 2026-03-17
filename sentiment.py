@@ -150,64 +150,8 @@ async def _finbert_score(headlines: list[str]) -> list[dict] | None:
         "Content-Type": "application/json",
     }
 
-    # Шаг 1: пробуем батч
-    need_singles = False
-    try:
-        async with aiohttp.ClientSession() as session:
-            payload = {"inputs": en_headlines}
-            async with session.post(
-                HF_API_URL, json=payload, headers=headers, timeout=TIMEOUT
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    logger.info(
-                        f"FinBERT batch response: type={type(data).__name__}, "
-                        f"len={len(data) if isinstance(data, list) else 0}, "
-                        f"first={str(data[0])[:80] if isinstance(data, list) and data else 'empty'}"
-                    )
-
-                    if isinstance(data, list) and len(data) > 0:
-                        first = data[0]
-
-                        if isinstance(first, list):
-                            # ✅ Батч работает: [[{label,score},...], ...]
-                            results = []
-                            for item in data:
-                                scores = {d["label"].lower(): d["score"] for d in item}
-                                results.append(scores)
-                            logger.info(f"✅ FinBERT батч: {len(results)} заголовков")
-                            return results
-
-                        elif isinstance(first, dict) and "label" in first:
-                            # ⚠️ ИСПРАВЛЕНО: HF вернул плоский список — ответ только на 1 заголовок
-                            # НЕ добавляем в results — запускаем одиночные запросы
-                            logger.warning(
-                                "FinBERT батч → плоский список (1 заголовок) — "
-                                "запускаю одиночные запросы для всех 15"
-                            )
-                            need_singles = True
-
-                        else:
-                            logger.warning(f"FinBERT неизвестный формат батча: {str(data)[:200]}")
-                            need_singles = True
-
-                elif resp.status == 503:
-                    logger.warning("FinBERT: модель загружается (503)")
-                    return None
-                else:
-                    err = await resp.text()
-                    logger.warning(f"FinBERT API {resp.status}: {err[:100]}")
-                    return None
-
-    except asyncio.TimeoutError:
-        logger.warning("FinBERT: timeout на батче, пробую одиночные запросы")
-        need_singles = True
-    except Exception as e:
-        logger.warning(f"FinBERT батч error: {e}, пробую одиночные запросы")
-        need_singles = True
-
-    # Шаг 2: одиночные параллельные запросы (если батч не сработал)
-    if need_singles:
+    # Батч не поддерживается HF router — сразу одиночные параллельные запросы
+    if True:
         logger.info(f"FinBERT: отправляю {min(len(en_headlines), 10)} заголовков по одному...")
         async with aiohttp.ClientSession() as session:
             tasks = [
