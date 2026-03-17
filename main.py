@@ -439,7 +439,9 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
 
     _news_for_sentiment = news if news else news_ctx
     logger.info(f"📰 News для FinBERT (первые 300 символов): {repr(_news_for_sentiment[:300])}")
-    sentiment_result, confidence_instr = await analyze_and_filter_async(_news_for_sentiment, str(live_prices))
+    # ИСПРАВЛЕНО: live_prices вытеснял заголовки новостей из лимита MAX_HEADLINES=15
+    # FinBERT должен анализировать только заголовки, не цены активов
+    sentiment_result, confidence_instr = await analyze_and_filter_async(_news_for_sentiment, "")
     sentiment_block = format_for_agents(sentiment_result, confidence_instr)
 
     orchestrator = DebateOrchestrator()
