@@ -132,7 +132,10 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
         now            = datetime.now().strftime("%d.%m.%Y %H:%M")
         bull_pct, bear_pct = _parse_bull_bear_score(report)
         scenarios      = _parse_scenarios(report)
-        finbert        = _parse_finbert(report)
+        # Читаем FinBERT из prices["SENTIMENT"] (более надёжно чем парсинг отчёта)
+        finbert = prices.get("SENTIMENT")
+        if not finbert:
+            finbert = _parse_finbert(report)  # fallback
 
         # Получаем названия моделей из ai_provider
         try:
