@@ -775,17 +775,16 @@ async def _send_russia(message: Message, user_id: int):
     )
     try:
         await increment_requests(user_id)
-        # ИСПРАВЛЕНО v2.1: передаём global_report для синхронизации цены нефти
-        russia_ctx = await fetch_russia_context(global_report=global_report)
-        report     = await run_russia_analysis(global_report, russia_ctx)
+    # ИСПРАВЛЕНО v2.1: синхронизируем контекст РФ без лишнего аргумента
+    russia_ctx = await fetch_russia_context()
+    report     = await run_russia_analysis(global_report, russia_ctx)
 
-        russia_cache.update({
-            "report":    report,
-            "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
-            "ts":        time.time(),
-        })
-        await bot.delete_message(message.chat.id, wait.message_id)
-
+    russia_cache.update({
+        "report":    report,
+        "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "ts":        time.time(),
+    })
+    await bot.delete_message(message.chat.id, wait.message_id)
         if charts_ok():
             try:
                 chart = generate_russia_chart(report)
