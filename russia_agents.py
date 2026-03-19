@@ -332,21 +332,36 @@ async def call_mistral_synth(system: str, user_message: str) -> str:
         "max_tokens": 4000,
     }
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                MISTRAL_URL, json=payload, headers=headers, timeout=TIMEOUT
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
-                else:
-                    error = await resp.text()
-                    logger.error(f"Mistral synth error {resp.status}: {error[:200]}")
-                    return f"⚠️ Mistral ошибка {resp.status}"
-    except Exception as e:
-        logger.error(f"Mistral synth exception: {e}")
-        return f"⚠️ Mistral недоступен: {str(e)[:100]}"
+    # Retry логика: 3 попытки с паузами при 429
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    MISTRAL_URL, json=payload, headers=headers, timeout=TIMEOUT
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        logger.info(f"✅ Mistral Large синтез OK (попытка {attempt+1})")
+                        return data["choices"][0]["message"]["content"]
+                    elif resp.status == 429:
+                        wait = 15 * (attempt + 1)  # 15, 30, 45 сек
+                        logger.warning(f"Mistral 429 — жду {wait}с (попытка {attempt+1}/3)")
+                        await asyncio.sleep(wait)
+                        # При 3-й попытке — пробуем mistral-small
+                        if attempt == 2:
+                            logger.warning("Mistral Large недоступен — пробую Small")
+                            payload["model"] = "mistral-small-latest"
+                            payload["max_tokens"] = 2000
+                    else:
+                        error = await resp.text()
+                        logger.error(f"Mistral synth error {resp.status}: {error[:200]}")
+                        return f"⚠️ Mistral ошибка {resp.status}"
+        except Exception as e:
+            logger.error(f"Mistral synth exception (попытка {attempt+1}): {e}")
+            if attempt < 2:
+                await asyncio.sleep(10)
+
+    return "⚠️ Mistral недоступен после 3 попыток — попробуй /russia через 5 минут"
 
 
 # ─── Главная функция ──────────────────────────────────────────────────────────
@@ -370,10 +385,12 @@ async def run_russia_analysis(global_report: str, russia_context: str) -> str:
     logger.info("🦙 Запускаю Groq агентов...")
 
     opportunities = await call_groq(RUSSIA_OPPORTUNITIES_SYSTEM, combined)
-    await asyncio.sleep(6)  # пауза между запросами Groq (rate limit protection)
+    await asyncio.sleep(10)  # пауза между запросами Groq (rate limit protection)
     risks = await call_groq(RUSSIA_RISKS_SYSTEM, combined)
 
-    logger.info("✅ Groq агенты завершили, запускаю Mistral синтез...")
+    logger.info("✅ Groq агенты завершили, пауза перед Mistral синтезом...")
+    await asyncio.sleep(5)  # даём время Mistral rate limit восстановиться
+    logger.info("⚖️ Запускаю Mistral Large синтез...")
 
     synth_input = f"""ГЛОБАЛЬНЫЙ АНАЛИЗ (резюме):
 {global_report[:1500]}
