@@ -361,7 +361,39 @@ async def call_mistral_synth(system: str, user_message: str) -> str:
             if attempt < 2:
                 await asyncio.sleep(10)
 
-    return "⚠️ Mistral недоступен после 3 попыток — попробуй /russia через 5 минут"
+    # Последний резерв — Mistral Small с упрощённым промптом
+    logger.warning("Mistral Large исчерпан → аварийный синтез на Mistral Small")
+    short_system = """Ты — краткий финансовый аналитик для россиян.
+Дай КОРОТКИЙ итог (5-7 предложений) на основе анализа возможностей и рисков.
+Обязательно: 1 конкретный тикер для инвестора, прогноз рубля одной фразой, 1 главное действие."""
+
+    short_payload = {
+        "model": "mistral-small-latest",
+        "messages": [
+            {"role": "system", "content": short_system},
+            {"role": "user", "content": user_message[:2000]},  # укорачиваем
+        ],
+        "temperature": 0.3,
+        "max_tokens": 800,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                MISTRAL_URL, json=short_payload, headers=headers, timeout=TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    logger.info("✅ Аварийный Mistral Small синтез OK")
+                    result = data["choices"][0]["message"]["content"]
+                    return f"⚠️ _Mistral Large недоступен — краткий итог:_\n\n{result}"
+    except Exception as e:
+        logger.error(f"Аварийный синтез тоже упал: {e}")
+
+    return (
+        "⚠️ _Синтез временно недоступен (лимиты API исчерпаны)._\n"
+        "📋 Выше — полный анализ возможностей и рисков от Llama агентов.\n"
+        "_Попробуй /russia через 30-60 минут._"
+    )
 
 
 # ─── Главная функция ──────────────────────────────────────────────────────────
