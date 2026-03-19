@@ -775,16 +775,19 @@ async def _send_russia(message: Message, user_id: int):
     )
     try:
         await increment_requests(user_id)
-    # ИСПРАВЛЕНО v2.1: синхронизируем контекст РФ без лишнего аргумента
-    russia_ctx = await fetch_russia_context()
-    report     = await run_russia_analysis(global_report, russia_ctx)
 
-    russia_cache.update({
-        "report":    report,
-        "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "ts":        time.time(),
-    })
-    await bot.delete_message(message.chat.id, wait.message_id)
+        # ИСПРАВЛЕНО v2.1
+        russia_ctx = await fetch_russia_context()
+        report     = await run_russia_analysis(global_report, russia_ctx)
+
+        russia_cache.update({
+            "report":    report,
+            "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
+            "ts":        time.time(),
+        })
+
+        await bot.delete_message(message.chat.id, wait.message_id)
+
         if charts_ok():
             try:
                 chart = generate_russia_chart(report)
@@ -798,13 +801,18 @@ async def _send_russia(message: Message, user_id: int):
 
         for chunk in split_msg(report):
             await message.answer(chunk)
-        await message.answer("Был ли анализ полезным?",
-                             reply_markup=feedback_kb("russia"))
+
+        await message.answer(
+            "Был ли анализ полезным?",
+            reply_markup=feedback_kb("russia")
+        )
+
     except Exception as e:
         logger.error(f"Russia error: {e}", exc_info=True)
         await bot.edit_message_text(
             f"❌ Ошибка: {str(e)[:200]}",
-            chat_id=message.chat.id, message_id=wait.message_id,
+            chat_id=message.chat.id,
+            message_id=wait.message_id,
         )
 
 
