@@ -147,6 +147,8 @@ def _parse_russia_items(text: str, marker: str) -> list:
         # Ловим • с любым количеством пробелов перед ним
         if stripped.startswith("•") and len(stripped) > 3:
             raw = stripped.lstrip("• ").strip()
+            # Убираем emoji в начале названия (🏛️, 🛢️, 💰 и т.д.)
+            raw = re.sub(r'^[🀀-🿿☀-➿︀-﻿‍️]+\s*', '', raw)
             # Убираем markdown символы
             raw = re.sub(r"[*_`]", "", raw)
             # Убираем "(1-3 месяца)" и подобные скобки в конце названия
