@@ -141,22 +141,20 @@ def _parse_russia_items(text: str, marker: str) -> list:
 
     current_name = None
     for line in lines:
-        # strip() убирает ВСЕ ведущие пробелы — ключевой фикс
         stripped = line.strip()
 
-        # Ловим • с любым количеством пробелов перед ним
         if stripped.startswith("•") and len(stripped) > 3:
             raw = stripped.lstrip("• ").strip()
-            # Убираем emoji в начале названия (🏛️, 🛢️, 💰 и т.д.)
-            raw = re.sub(r'^[🀀-🿿☀-➿︀-﻿‍️]+\s*', '', raw)
-            # Убираем markdown символы
+            # Убираем markdown
             raw = re.sub(r"[*_`]", "", raw)
-            # Убираем "(1-3 месяца)" и подобные скобки в конце названия
+            # Убираем emoji — оставляем только буквы, цифры, кириллицу и пунктуацию
+            raw = "".join(c for c in raw if c.isalnum() or c in " ,:.()/+-%" or "\u0400" <= c <= "\u04FF")
+            raw = raw.strip()
+            # Убираем скобки с периодом в конце
             raw = re.sub(r"\s*\([^)]+\)\s*$", "", raw).strip()
             if raw:
                 current_name = raw[:28]
 
-        # Ловим Уверенность/Вероятность (с точкой в конце тоже работает)
         if current_name and re.search(r"(Уверенность|Вероятность)\s*:", stripped, re.IGNORECASE):
             for key, val in rating_map.items():
                 if key in stripped:
@@ -166,7 +164,6 @@ def _parse_russia_items(text: str, marker: str) -> list:
                     break
 
     return items
-
 
 def generate_main_chart(report: str, prices: dict, stars: str, pct: int):
     if not MATPLOTLIB_OK:
@@ -365,7 +362,7 @@ def generate_russia_chart(russia_report: str):
         ax1 = axes[0]
         ax1.set_title("Возможности", color=COLORS["bull"], fontsize=10, pad=8)
         if opportunities:
-            names   = [o["name"][:22] for o in opportunities[:5]]
+            names   = [re.sub(r'[^\w\s\u0400-\u04FF:.,()-]', '', o["name"])[:22] for o in opportunities[:5]]
             ratings = [o["rating"] for o in opportunities[:5]]
             colors  = [COLORS["bull"] if r >= 3 else COLORS["gold"] for r in ratings]
             bars    = ax1.barh(range(len(names)), ratings, color=colors, height=0.6)
@@ -387,7 +384,7 @@ def generate_russia_chart(russia_report: str):
         ax2 = axes[1]
         ax2.set_title("Риски", color=COLORS["bear"], fontsize=10, pad=8)
         if risks:
-            names   = [r["name"][:22] for r in risks[:5]]
+            names   = [re.sub(r'[^\w\s\u0400-\u04FF:.,()-]', '', r["name"])[:22] for r in risks[:5]]
             ratings = [r["rating"] for r in risks[:5]]
             colors  = [COLORS["bear"] if rv >= 3 else COLORS["gold"] for rv in ratings]
             bars    = ax2.barh(range(len(names)), ratings, color=colors, height=0.6)
