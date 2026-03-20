@@ -359,15 +359,36 @@ def generate_russia_chart(russia_report: str):
         fig.suptitle("🇷🇺 RUSSIA EDGE — Анализ рисков и возможностей",
                      color=COLORS["gold"], fontsize=12, fontweight="bold", y=1.02)
 
-        # Логируем первые 500 символов для диагностики
-        logger.info(f"Russia chart: report len={len(russia_report)}, "
+        # Логируем для диагностики
+        logger.info(f"Russia chart v4: report len={len(russia_report)}, "
                     f"has_green={'🟢' in russia_report}, has_red={'🔴' in russia_report}")
-        logger.info(f"Russia report start: {repr(russia_report[:300])}")
 
         opportunities = _parse_russia_items(russia_report, "🟢")
         risks         = _parse_russia_items(russia_report, "🔴")
 
-        logger.info(f"Russia chart parsed: {len(opportunities)} opportunities, {len(risks)} risks")
+        # Если 🟢 не нашёл — пробуем текстовый маркер
+        if not opportunities:
+            logger.warning("🟢 не найден — пробую текстовый маркер ВОЗМОЖНОСТИ")
+            for alt_marker in ["ВОЗМОЖНОСТИ ДЛЯ РОССИЯН", "ВОЗМОЖНОСТИ:"]:
+                if alt_marker in russia_report:
+                    # Временно заменяем маркер
+                    tmp = russia_report.replace(alt_marker, "🟢 " + alt_marker, 1)
+                    opportunities = _parse_russia_items(tmp, "🟢")
+                    if opportunities:
+                        logger.info(f"Fallback маркер сработал: {len(opportunities)} items")
+                        break
+
+        if not risks:
+            logger.warning("🔴 не найден — пробую текстовый маркер РИСКИ")
+            for alt_marker in ["РИСКИ ДЛЯ РОССИЙСКОГО БИЗНЕСА", "РИСКИ:"]:
+                if alt_marker in russia_report:
+                    tmp = russia_report.replace(alt_marker, "🔴 " + alt_marker, 1)
+                    risks = _parse_russia_items(tmp, "🔴")
+                    if risks:
+                        logger.info(f"Fallback риски сработал: {len(risks)} items")
+                        break
+
+        logger.info(f"Russia chart parsed: {len(opportunities)} opp, {len(risks)} risks")
 
         ax1 = axes[0]
         ax1.set_title("Возможности", color=COLORS["bull"], fontsize=10, pad=8)
