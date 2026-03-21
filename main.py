@@ -388,7 +388,9 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
                 in_bear, in_bull = True, False
                 continue
             stripped = line.strip()
-            if not stripped or stripped.startswith("──"):
+            if not stripped or stripped.startswith("──") or re.match(r"^[-_*═─]{3,}\s*$", stripped):
+                continue
+            if stripped.startswith("#") and len(stripped) < 80:
                 continue
             if in_bull and len(bull_lines) < 3:
                 bull_lines.append(stripped)
@@ -676,8 +678,8 @@ async def handle_debate_page(callback: CallbackQuery):
 
     round_text = debate_plain_text(rounds[round_idx])
 
-    if len(round_text) > 4000:
-        round_text = round_text[:3900] + "\n\n(…сокращено)"
+    if len(round_text) > 4080:
+        round_text = round_text[:4050] + "\n\n(…сокращено)"
 
     kb = debates_keyboard(user_id, round_idx, len(rounds))
 
@@ -1075,10 +1077,9 @@ async def cmd_russia(message: Message):
     now_ts = time.time()
     if russia_cache.get("report") and (now_ts - russia_cache.get("ts", 0)) < 7200:
         cached_ru = russia_cache["report"]
-        for i, chunk in enumerate(split_message(cached_ru)):
+        await send_russia_chart_photo(message.chat.id, cached_ru)
+        for chunk in split_message(cached_ru):
             await message.answer(chunk, parse_mode="Markdown")
-            if i == 0:
-                await send_russia_chart_photo(message.chat.id, cached_ru)
         await message.answer(
             f"📦 _Кэш от {russia_cache['timestamp']}. Новый через 2ч._",
             parse_mode="Markdown",
@@ -1141,10 +1142,9 @@ async def cmd_russia(message: Message):
 
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
 
-        for i, chunk in enumerate(split_message(report)):
+        await send_russia_chart_photo(message.chat.id, report)
+        for chunk in split_message(report):
             await message.answer(chunk, parse_mode="Markdown")
-            if i == 0:
-                await send_russia_chart_photo(message.chat.id, report)
 
         await message.answer(
             "💬 *Был ли анализ полезным?*",
@@ -1206,10 +1206,9 @@ async def handle_russia_choice(callback: CallbackQuery):
             message_id=wait_msg.message_id
         )
 
-        for i, chunk in enumerate(split_message(report)):
+        await send_russia_chart_photo(callback.message.chat.id, report)
+        for chunk in split_message(report):
             await callback.message.answer(chunk, parse_mode="Markdown")
-            if i == 0:
-                await send_russia_chart_photo(callback.message.chat.id, report)
 
         await callback.message.answer(
             "💬 *Был ли анализ полезным?*",

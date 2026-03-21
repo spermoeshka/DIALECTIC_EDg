@@ -120,20 +120,17 @@ def _parse_finbert(report: str):
 def _parse_russia_items(text: str, marker: str) -> list:
     """
     Парсит блоки возможностей/рисков из Russia Edge отчёта.
-    Обрабатывает форматы:
-      " • Название (период)" — с пробелами перед •
-      "  Уверенность: ВЫСОКАЯ." — с точкой в конце
+    Bullet: •, -, –, *; рейтинг: Уверенность/Вероятность ВЫСОКАЯ/СРЕДНЯЯ/НИЗКАЯ.
     """
     items      = []
     rating_map = {"ВЫСОКАЯ": 3, "СРЕДНЯЯ": 2, "НИЗКАЯ": 1}
+    bullet_re  = re.compile(r"^[\s]*[•\-–*]\s+", re.UNICODE)
 
     start = text.find(marker)
     if start == -1:
         return items
 
     other_marker = "🔴" if marker == "🟢" else "🟢"
-    # ВАЖНО: убрали "──────" из стоп-маркеров!
-    # Разделители есть внутри блока возможностей/рисков — они обрезали данные.
     end_markers  = [other_marker, "🇷🇺 ИТОГ", "🤝 Честно"]
     end          = len(text)
     for em in end_markers:
@@ -148,22 +145,20 @@ def _parse_russia_items(text: str, marker: str) -> list:
     for line in lines:
         stripped = line.strip()
 
-        if stripped.startswith("•") and len(stripped) > 3:
-            raw = stripped.lstrip("• ").strip()
-            # Убираем markdown
+        # Bullet line: " • Название" или " - Название" или "– Название"
+        if bullet_re.match(stripped) and len(stripped) > 4:
+            raw = bullet_re.sub("", stripped).strip()
             raw = re.sub(r"[*_`]", "", raw)
-            # Убираем emoji — оставляем только буквы, цифры, кириллицу и пунктуацию
             raw = "".join(c for c in raw if c.isalnum() or c in " ,:.()/+-%" or "\u0400" <= c <= "\u04FF")
             raw = raw.strip()
-            # Убираем скобки с периодом в конце
             raw = re.sub(r"\s*\([^)]+\)\s*$", "", raw).strip()
             if raw:
-                current_name = raw[:28]
+                current_name = raw[:30]
 
-        if current_name and re.search(r"(Уверенность|Вероятность)\s*:", stripped, re.IGNORECASE):
+        if current_name and re.search(r"(Уверенность|Вероятность)\s*:\s*\w+", stripped, re.IGNORECASE):
             for key, val in rating_map.items():
-                if key in stripped:
-                    if val >= 2:
+                if key in stripped.upper():
+                    if val >= 1:  # включаем и НИЗКАЯ для полноты
                         items.append({"name": current_name, "rating": val})
                     current_name = None
                     break
