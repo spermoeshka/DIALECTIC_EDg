@@ -33,13 +33,16 @@ class Storage:
         except Exception as e:
             logger.warning(f"Cache save error: {e}")
 
-    def cache_report(self, report: str):
-        """Кэширует последний отчёт."""
-        self._data["last_report"] = {
+    def cache_report(self, report: str, prices: dict | None = None):
+        """Кэширует последний отчёт и снимок цен (для графика при отдаче из кэша)."""
+        entry = {
             "report": report,
             "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
-            "expires": (datetime.now() + timedelta(hours=CACHE_TTL_HOURS)).isoformat()
+            "expires": (datetime.now() + timedelta(hours=CACHE_TTL_HOURS)).isoformat(),
         }
+        if prices is not None:
+            entry["prices"] = prices
+        self._data["last_report"] = entry
         self._save()
         logger.info("Отчёт кэширован")
 

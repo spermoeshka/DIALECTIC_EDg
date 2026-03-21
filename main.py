@@ -20,7 +20,7 @@ except ImportError:
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
-    Message, CallbackQuery,
+    Message, CallbackQuery, BufferedInputFile,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 
@@ -31,6 +31,7 @@ from web_search import get_full_realtime_context, search_news_context
 from meta_analyst import get_meta_context
 from sentiment import analyze_and_filter, format_for_agents
 from agents import DebateOrchestrator
+from chart_generator import generate_main_chart
 from storage import Storage
 from database import (
     init_db, upsert_user, get_user, increment_requests,
@@ -140,6 +141,25 @@ def signal_to_stars(confidence) -> str:
         confidence = 0.5
     stars = max(1, min(5, round(confidence * 5)))
     return "⭐" * stars + "☆" * (5 - stars)
+
+
+def extract_signal_pct_and_stars(report: str) -> tuple[int, str]:
+    """
+    Процент в отчёте — это шкала уверенности FinBERT в классификации тона новостей
+    (маппинг HIGH/MEDIUM/LOW → 85/55/25), а не «уверенность в направлении рынка».
+    """
+    m = re.search(r"Уровень\s+сигнала[^\d(]*\((\d+)%", report, re.IGNORECASE)
+    if not m:
+        m = re.search(r"📶[^\n]{0,160}\((\d+)%", report)
+    pct = int(m.group(1)) if m else 50
+    pct = max(0, min(100, pct))
+    return pct, signal_to_stars(pct / 100)
+
+
+SIGNAL_PCT_EXPLAINED = (
+    "Число % — уверенность FinBERT в тоне новостей (HIGH≈85%, MEDIUM≈55%, LOW≈25%), "
+    "не прогноз «рынок пойдёт вверх/вниз». Звёзды — наглядная шкала той же метрики."
+)
 
 
 # Маркеры должны совпадать с `DebateOrchestrator._format_report` в agents.py
@@ -290,8 +310,8 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
         f"📊 DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ\n"
         f"🕐 {now}\n\n"
         f"4 AI-модели изучили рынок и поспорили. Вот что вышло:\n\n"
-        f"Уровень сигнала: {stars} ({pct}% уверенности)\n"
-        f"Больше звёзд = данные чище и противоречивее\n\n"
+        f"Уровень сигнала: {stars} ({pct}%)\n"
+        f"{SIGNAL_PCT_EXPLAINED}\n\n"
         f"{'─' * 30}\n\n"
         f"🐂 Бычья позиция (кратко):\n{bull_summary}\n\n"
         f"🐻 Медвежья позиция (кратко):\n{bear_summary}\n\n"
@@ -322,6 +342,51 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
 
     logger.info(f"Total messages to send: {len(messages)}")
     return messages
+
+
+async def send_digest_chart(
+    chat_id: int,
+    report: str,
+    prices_dict: dict,
+    stars_str: str,
+    pct_val: int,
+) -> None:
+    try:
+        buf = generate_main_chart(report, prices_dict or {}, stars_str, pct_val)
+        if not buf:
+            return
+        raw = buf.getvalue() if hasattr(buf, "getvalue") else buf.read()
+        await bot.send_photo(
+            chat_id,
+            photo=BufferedInputFile(raw, filename="dialectic_edge.png"),
+        )
+    except Exception as e:
+        logger.warning("Карточка-график не отправлена: %s", e)
+
+
+async def send_daily_digest_bundle(
+    chat_id: int,
+    user_id: int,
+    report: str,
+    prices_dict: dict,
+) -> None:
+    """Текст дайджеста + график (после первого блока) + клавиатура."""
+    parts = parse_report_parts(report)
+    pct_val, stars_str = extract_signal_pct_and_stars(report)
+    debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
+    messages = build_short_report(parts, stars_str, pct_val)
+    logger.info(f"Отправляю {len(messages)} сообщений. Размеры: {[len(m) for m in messages]}")
+    for i, msg in enumerate(messages):
+        logger.info(f"Отправляю чанк {i+1}/{len(messages)}, размер: {len(msg)}")
+        await bot.send_message(chat_id, msg)
+        if i == 0:
+            await send_digest_chart(chat_id, report, prices_dict or {}, stars_str, pct_val)
+        await asyncio.sleep(0.3)
+    await bot.send_message(
+        chat_id,
+        "Полный анализ выше",
+        reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"])),
+    )
 
 
 def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
@@ -532,7 +597,7 @@ async def run_full_analysis(
     user_id: int,
     custom_news: str = "",
     custom_mode: bool = False
-) -> str:
+) -> tuple[str, dict]:
     tasks = [
         fetcher.fetch_all(),
         fetch_full_context(),
@@ -590,6 +655,13 @@ async def run_full_analysis(
         f"Score: {sentiment_result.score:+.2f}"
     )
 
+    prices_dict = dict(prices_dict) if prices_dict else {}
+    prices_dict["SENTIMENT"] = {
+        "score": sentiment_result.score,
+        "label": sentiment_result.label,
+        "confidence": sentiment_result.confidence,
+    }
+
     orchestrator = DebateOrchestrator()
     report = await orchestrator.run_debate(
         news_context=news_context,
@@ -614,8 +686,8 @@ async def run_full_analysis(
 
     separator = "─" * 30 + "\n"
     signal_line = (
-        f"📶 *Уровень сигнала:* {stars} ({pct}% уверенности)\n"
-        f"_Чем больше звёзд — тем чище и противоречивее данные для анализа_\n\n"
+        f"📶 *Уровень сигнала:* {stars} ({pct}% — уверенность FinBERT в тоне новостей)\n"
+        f"_Не направление рынка; расшифровка — в шапке дайджеста._\n\n"
     )
     report = report.replace(separator, separator + signal_line, 1)
 
@@ -630,7 +702,7 @@ async def run_full_analysis(
     )
 
     if not custom_mode:
-        storage.cache_report(report)
+        storage.cache_report(report, prices_dict)
         if scheduler is not None:
             asyncio.create_task(scheduler.export_now())
         # Кэшируем дайджест на GitHub для отслеживания точности (п.6)
@@ -640,13 +712,23 @@ async def run_full_analysis(
         except Exception as e:
             logger.warning(f"Digest cache error: {e}")
 
-    return report
+    return report, prices_dict
 
 
 # ─── /daily ───────────────────────────────────────────────────────────────────
 
 async def run_daily_analysis(user_id: int) -> str:
-    return await run_full_analysis(user_id)
+    report, _ = await run_full_analysis(user_id)
+    return report
+
+
+async def deliver_scheduled_daily(user_id: int) -> None:
+    """Рассылка подписчикам: полный прогон + те же сообщения, что и при /daily."""
+    try:
+        report, prices = await run_full_analysis(user_id)
+        await send_daily_digest_bundle(user_id, user_id, report, prices)
+    except Exception as e:
+        logger.warning("Рассылка дайджеста user %s: %s", user_id, e)
 
 
 @dp.message(Command("daily"))
@@ -664,20 +746,9 @@ async def cmd_daily(message: Message):
 
     cached = storage.get_cached_report()
     if cached:
-        report = cached['report']
-        _conf_map = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
-        parts = parse_report_parts(report)
-        # Кэшируем раунды для листания
-        debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
-
-        messages = build_short_report(parts, "⭐⭐⭐⭐☆", 85)
-        for msg in messages:
-            await message.answer(msg)
-
-        await message.answer(
-            "Полный анализ выше",
-            reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
-        )
+        report = cached["report"]
+        prices = cached.get("prices") or {}
+        await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
         await message.answer(f"Кэш от {cached['timestamp']}. Новый через 2ч.")
         return
 
@@ -690,36 +761,9 @@ async def cmd_daily(message: Message):
 
     try:
         await increment_requests(user_id)
-        report = await run_daily_analysis(user_id)
+        report, prices = await run_full_analysis(user_id)
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
-
-        # Парсим отчёт на части
-        parts = parse_report_parts(report)
-
-        # Вычисляем звёзды из отчёта
-        stars_line = ""
-        pct_val = 85
-        if "Уровень сигнала" in report:
-            import re
-            m = re.search(r"Уровень сигнала.*?(\d+)%", report)
-            if m:
-                pct_val = int(m.group(1))
-        stars_str = signal_to_stars(pct_val / 100)
-
-        # Кэшируем раунды для кнопки
-        debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
-
-        messages = build_short_report(parts, stars_str, pct_val)
-        logger.info(f"Отправляю {len(messages)} сообщений. Размеры: {[len(m) for m in messages]}")
-        for i, msg in enumerate(messages):
-            logger.info(f"Отправляю чанк {i+1}/{len(messages)}, размер: {len(msg)}")
-            await message.answer(msg)
-            await asyncio.sleep(0.3)  # пауза между сообщениями
-
-        await message.answer(
-            "Полный анализ выше",
-            reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
-        )
+        await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
 
     except Exception as e:
         logger.error(f"Daily error: {e}", exc_info=True)
@@ -767,28 +811,11 @@ async def cmd_analyze(message: Message):
 
     try:
         await increment_requests(user_id)
-        report = await run_full_analysis(user_id, custom_news=user_news, custom_mode=True)
-        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
-
-        report_parts = parse_report_parts(report)
-        debate_cache[user_id] = {"rounds": report_parts["rounds"], "full": report}
-
-        pct_val = 85
-        import re
-        m = re.search(r"Уровень сигнала.*?(\d+)%", report)
-        if m:
-            pct_val = int(m.group(1))
-        stars_str = signal_to_stars(pct_val / 100)
-
-        short = build_short_report(report_parts, stars_str, pct_val)
-        chunks = split_message(short)
-        for chunk in chunks[:-1]:
-            await message.answer(chunk, parse_mode="Markdown")
-        await message.answer(
-            chunks[-1],
-            parse_mode="Markdown",
-            reply_markup=main_report_keyboard(user_id, has_debates=bool(report_parts["rounds"]))
+        report, prices = await run_full_analysis(
+            user_id, custom_news=user_news, custom_mode=True
         )
+        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
 
     except Exception as e:
         logger.error(f"Analyze error: {e}", exc_info=True)
@@ -1249,7 +1276,7 @@ async def main():
 
     scheduler = Scheduler(
         bot=bot,
-        send_daily_fn=run_daily_analysis,
+        send_daily_fn=deliver_scheduled_daily,
         check_predictions_fn=check_pending_predictions
     )
 
