@@ -69,6 +69,7 @@ AGENT_TEMPERATURE    = float(os.getenv("AGENT_TEMP", "0.7"))
 # Первый провайдер для Bull/Bear/Verifier/Synth (ai_provider.py):
 #   AI_DEBATE_PRIMARY=mistral|groq|openrouter|together|gemini
 # Модели: GROQ_MODEL, OPENROUTER_MODEL, TOGETHER_MODEL, MISTRAL_MODEL, MISTRAL_SYNTH_MODEL, GEMINI_MODEL
+# Росстат на Railway: при SSLCertVerificationError — RUSSIA_ROSSTAT_INSECURE_SSL=1 (только этот URL, на свой риск)
 
 # ─── НОВОСТИ ──────────────────────────────────────────────────────────────────
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")

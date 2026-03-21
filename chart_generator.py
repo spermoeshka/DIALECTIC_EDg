@@ -87,20 +87,124 @@ def _parse_scenarios(report: str) -> dict:
     return scenarios
 
 
-def _parse_bull_bear_score(report: str) -> tuple:
+def _keyword_bull_bear_ratio(report: str) -> tuple[float, float]:
+    """Грубый подсчёт по словам (в полном тексте дебатов даёт сильный шум)."""
     bull_signals = [
         "бычий", "рост", "покупать", "long", "восстановлени",
-        "позитивный", "сильный сигнал", "точка входа"
+        "позитивный", "сильный сигнал", "точка входа",
     ]
     bear_signals = [
         "медвежий", "падение", "продавать", "short", "риск",
-        "давление", "коррекция", "стагфляци"
+        "давление", "коррекция", "стагфляци",
     ]
     text = report.lower()
     bull = sum(text.count(s) for s in bull_signals)
     bear = sum(text.count(s) for s in bear_signals)
     total = bull + bear or 1
     return round(bull / total * 100, 1), round(bear / total * 100, 1)
+
+
+def _extract_synth_verdict(report: str) -> str | None:
+    """
+    Итог дебатов обычно в хвосте отчёта (Synth / судья).
+    Возвращает 'bear' | 'bull' | 'neutral' или None.
+    """
+    tail = report[-25000:] if len(report) > 25000 else report
+    t = tail.lower()
+    # Судья / итог (порядок важен: сначала явные метки)
+    patterns_bear = [
+        r"вердикт\s+судьи[^\n]{0,160}медвеж",
+        r"🏆[^\n]{0,200}медвеж",
+        r"итог[^\n]{0,120}медвеж",
+        r"вердикт[^\n]{0,100}🐻",
+    ]
+    patterns_bull = [
+        r"вердикт\s+судьи[^\n]{0,160}быч",
+        r"🏆[^\n]{0,200}быч",
+        r"итог[^\n]{0,120}быч",
+        r"вердикт[^\n]{0,100}🐂",
+    ]
+    patterns_neutral = [
+        r"вердикт\s+судьи[^\n]{0,160}нейтрал",
+        r"🏆[^\n]{0,200}нейтрал",
+    ]
+    for p in patterns_bear:
+        if re.search(p, t, re.IGNORECASE | re.DOTALL):
+            return "bear"
+    for p in patterns_bull:
+        if re.search(p, t, re.IGNORECASE | re.DOTALL):
+            return "bull"
+    for p in patterns_neutral:
+        if re.search(p, t, re.IGNORECASE | re.DOTALL):
+            return "neutral"
+    return None
+
+
+def _fear_greed_value(prices: dict | None) -> float | None:
+    if not prices:
+        return None
+    try:
+        macro = prices.get("MACRO") or {}
+        fng = macro.get("fng") or {}
+        v = fng.get("val")
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str) and v.replace(".", "").isdigit():
+            return float(v)
+    except Exception:
+        pass
+    return None
+
+
+def _parse_bull_bear_score(report: str, prices: dict | None = None) -> tuple[float, float]:
+    """
+    Полоса «баланс аргументов»: не дословный подсчёт слов по всему логу дебатов,
+    а опора на итоговый вердикт + корректировка по Fear & Greed (если есть).
+    """
+    kw_bull, kw_bear = _keyword_bull_bear_ratio(report)
+    verdict = _extract_synth_verdict(report)
+    fng = _fear_greed_value(prices)
+
+    if verdict == "bear":
+        bull, bear = 36.0, 64.0
+    elif verdict == "bull":
+        bull, bear = 64.0, 36.0
+    elif verdict == "neutral":
+        bull, bear = 48.0, 52.0
+    else:
+        bull, bear = kw_bull, kw_bear
+
+    # Смешение с keyword-оценкой (вердикт важнее, но не игнорируем «толщину» споров)
+    if verdict:
+        bull = round(0.65 * bull + 0.35 * kw_bull, 1)
+        bear = round(100.0 - bull, 1)
+
+    # Fear & Greed: без явного вердикта — сильная коррекция; с вердиктом — лёгкое усиление «в ту сторону»
+    if fng is not None:
+        if verdict is None:
+            if fng <= 20:
+                bear = min(88.0, bear + 10.0)
+                bull = round(100.0 - bear, 1)
+            elif fng <= 35:
+                bear = min(82.0, bear + 5.0)
+                bull = round(100.0 - bear, 1)
+            elif fng >= 75:
+                bull = min(88.0, bull + 10.0)
+                bear = round(100.0 - bull, 1)
+            elif fng >= 60:
+                bull = min(82.0, bull + 5.0)
+                bear = round(100.0 - bull, 1)
+        else:
+            if verdict == "bear" and fng <= 25:
+                bear = min(86.0, bear + 4.0)
+                bull = round(100.0 - bear, 1)
+            elif verdict == "bull" and fng >= 70:
+                bull = min(86.0, bull + 4.0)
+                bear = round(100.0 - bull, 1)
+
+    return bull, bear
 
 
 def _parse_finbert(report: str):
@@ -203,7 +307,7 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int):
         fig = plt.figure(figsize=(10, 6), facecolor=COLORS["bg"])
 
         now            = datetime.now().strftime("%d.%m.%Y %H:%M")
-        bull_pct, bear_pct = _parse_bull_bear_score(report)
+        bull_pct, bear_pct = _parse_bull_bear_score(report, prices)
         scenarios      = _parse_scenarios(report)
         finbert = prices.get("SENTIMENT")
         if not finbert:
@@ -252,6 +356,12 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int):
         ax1.legend(loc="upper right", fontsize=7,
                    facecolor=COLORS["surface"], edgecolor=COLORS["border"],
                    labelcolor=COLORS["text"])
+        ax1.text(
+            0.5, -0.42,
+            "Шкала: итог дебатов + Fear & Greed, не «кто чаще сказал рост/риск».",
+            transform=ax1.transAxes, ha="center", va="top",
+            fontsize=6, color=COLORS["subtext"],
+        )
 
         ax2 = fig.add_subplot(gs[0, 1])
         ax2.set_title("Вероятность сценариев", color=COLORS["text"], fontsize=10, pad=8)
