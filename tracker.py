@@ -298,6 +298,12 @@ def _parse_timeframe(raw: str) -> str:
 
 async def save_predictions_from_report(report_text: str, source_news: str = ""):
     """Извлекает и сохраняет все прогнозы из отчёта."""
+    vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
+    if vm:
+        verdict_line = re.sub(r"[*_`]", "", vm.group(1)).strip()
+        if verdict_line:
+            logger.info("Вердикт судьи из отчёта: %s", verdict_line[:120])
+
     predictions = extract_predictions_from_report(report_text)
 
     saved = 0

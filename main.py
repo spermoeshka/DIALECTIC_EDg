@@ -31,6 +31,7 @@ from web_search import get_full_realtime_context, search_news_context
 from meta_analyst import get_meta_context
 from sentiment import analyze_and_filter, format_for_agents
 from agents import DebateOrchestrator
+from report_sanitizer import sanitize_full_report
 from chart_generator import generate_main_chart
 from storage import Storage
 from database import (
@@ -767,6 +768,9 @@ async def run_full_analysis(
         profile_instruction=profile_instruction + sentiment_block,
         custom_mode=custom_mode
     )
+    report, _san_lines = sanitize_full_report(report)
+    if _san_lines:
+        logger.info("Пост-фильтр полного отчёта: удалено строк: %s", _san_lines)
 
     # ── Уровень сигнала ───────────────────────────────────────────────────────
     _conf_raw = sentiment_result.confidence
