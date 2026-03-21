@@ -83,27 +83,65 @@ async def fetch_cbr_data() -> str:
     except Exception as e:
         logger.warning(f"CBR курсы error: {e}")
 
-    # Ключевая ставка
+    # Ключевая ставка: JSON API → HTML с выбором строки по МАКС. дате (не rates[-1] — порядок строк на странице ЦБ не гарантирован)
+    def _rate_comment(rate_f: float) -> str:
+        if rate_f >= 20:
+            return "🔴 _исторически высокая — давит на бизнес и ипотеку_"
+        if rate_f >= 16:
+            return "🟠 _высокая — кредиты дорогие_"
+        if rate_f >= 12:
+            return "🟡 _умеренно высокая_"
+        return "🟢 _умеренная_"
+
+    rate_done = False
     try:
-        url = "https://www.cbr.ru/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From=01.01.2025&UniDbQuery.To=31.12.2026"
+        url = "https://api.cbr.ru/keyrate"
         async with _session() as session:
             async with session.get(url, timeout=TIMEOUT) as resp:
                 if resp.status == 200:
-                    text = await resp.text()
-                    rates = re.findall(r'(\d{2}\.\d{2}\.\d{4})</td>\s*<td[^>]*>([\d,]+)', text)
-                    if rates:
-                        date, rate = rates[-1]
-                        rate_val = rate.replace(",", ".")
-                        rate_f = float(rate_val)
-                        if rate_f >= 20:
-                            comment = "🔴 _исторически высокая — давит на бизнес и ипотеку_"
-                        elif rate_f >= 16:
-                            comment = "🟠 _высокая — кредиты дорогие_"
-                        else:
-                            comment = "🟡 _умеренная_"
-                        results.append(f"• 🏦 Ключевая ставка ЦБ: *{rate_val}%* {comment} _(на {date})_")
+                    data = await resp.json(content_type=None)
+                    if isinstance(data, list) and data:
+                        latest = max(data, key=lambda x: str(x.get("Date", "")))
+                        rate_f = float(latest.get("Rate") or 0)
+                        ds = str(latest.get("Date", ""))[:10]
+                        if rate_f > 0:
+                            results.append(
+                                f"• 🏦 Ключевая ставка ЦБ: *{rate_f:.2f}%* "
+                                f"{_rate_comment(rate_f)} _(на {ds})_"
+                            )
+                            rate_done = True
+                            logger.info("CBR keyrate API: %s%% на %s", rate_f, ds)
     except Exception as e:
-        logger.warning(f"CBR ставка error: {e}")
+        logger.warning(f"CBR keyrate API error: {e}")
+
+    if not rate_done:
+        try:
+            url = (
+                "https://www.cbr.ru/hd_base/KeyRate/"
+                "?UniDbQuery.Posted=True&UniDbQuery.From=01.01.2025&UniDbQuery.To=31.12.2026"
+            )
+            async with _session() as session:
+                async with session.get(url, timeout=TIMEOUT) as resp:
+                    if resp.status == 200:
+                        text = await resp.text()
+                        rates = re.findall(
+                            r"(\d{2}\.\d{2}\.\d{4})</td>\s*<td[^>]*>([\d,\.]+)", text
+                        )
+                        if rates:
+                            def _dkey(t: tuple) -> tuple:
+                                d, m, y = t[0].split(".")
+                                return (int(y), int(m), int(d))
+
+                            date, rate = max(rates, key=_dkey)
+                            rate_val = rate.replace(",", ".")
+                            rate_f = float(rate_val)
+                            results.append(
+                                f"• 🏦 Ключевая ставка ЦБ: *{rate_val}%* "
+                                f"{_rate_comment(rate_f)} _(на {date}, HTML)_"
+                            )
+                            logger.info("CBR keyrate HTML: %s%% на %s", rate_f, date)
+        except Exception as e:
+            logger.warning(f"CBR ставка HTML error: {e}")
 
     if not results:
         return ""

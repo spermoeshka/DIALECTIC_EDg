@@ -344,8 +344,11 @@ def format_prices_for_agents(prices: dict) -> str:
         lines.append("\n[МАКРОЭКОНОМИКА США]")
         lines.append(f"  Ставка ФРС:   {m['fed_rate']}%  [FRED]")
         lines.append(f"  Инфляция CPI: {_cpi_yoy(m.get('cpi_raw','N/A'))}  [FRED]")
-        lines.append(f"  Fear & Greed: {fv}/100 ({fs})  "
-                     f"{'🟢' if fc>0 else '🔴' if fc<0 else '➡️'} {fc:+d} за сутки")
+        lines.append(
+            f"  Fear & Greed: {fv}/100 ({fs})  "
+            f"{'🟢' if fc > 0 else '🔴' if fc < 0 else '➡️'} {fc:+d} за сутки  "
+            f"[Источник: Alternative.me Crypto F&G — НЕ FRED]"
+        )
         lines.append("  [!] CPI = индекс (~323), НЕ %. Инфляция = YoY (выше).")
 
     lines.append("\n[ФОНДОВЫЕ ИНДЕКСЫ]")
