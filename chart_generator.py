@@ -179,8 +179,6 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int):
     try:
         _setup_dark_style()
         fig = plt.figure(figsize=(10, 6), facecolor=COLORS["bg"])
-        gs  = GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.35,
-                       left=0.08, right=0.95, top=0.88, bottom=0.08)
 
         now            = datetime.now().strftime("%d.%m.%Y %H:%M")
         bull_pct, bear_pct = _parse_bull_bear_score(report)
@@ -195,11 +193,24 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int):
         except Exception:
             models_str = ""
 
-        fig.text(0.5, 0.95, "DIALECTIC EDGE — MARKET ANALYSIS",
+        grid_top = 0.80 if finbert else 0.88
+        gs  = GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.35,
+                       left=0.08, right=0.95, top=grid_top, bottom=0.08)
+
+        fig.text(0.5, 0.96, "DIALECTIC EDGE — MARKET ANALYSIS",
                  ha="center", va="top", fontsize=13, fontweight="bold",
                  color=COLORS["gold"])
-        fig.text(0.5, 0.91, f"{now}   |   Сигнал: {stars} ({pct}%)",
+        fig.text(0.5, 0.915, f"{now}   |   Сигнал: {stars} ({pct}%)",
                  ha="center", va="top", fontsize=9, color=COLORS["subtext"])
+        if finbert:
+            fl = str(finbert.get("label", "")).upper()
+            fc = str(finbert.get("confidence", "")).upper()
+            fig.text(
+                0.5, 0.875,
+                f"FinBERT: {fl} · уверенность классификатора: {fc} — полоса «Уровень сигнала» = эта уверенность, "
+                f"не прогноз «рынок вверх/вниз».",
+                ha="center", va="top", fontsize=7.2, color=COLORS["subtext"],
+            )
 
         ax1 = fig.add_subplot(gs[0, 0])
         ax1.set_title("Баланс аргументов", color=COLORS["text"], fontsize=10, pad=8)
@@ -290,7 +301,13 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int):
                          COLORS["gold"])
         ax4.barh([3.4], [pct],       height=0.3, color=sig_color)
         ax4.barh([3.4], [100 - pct], height=0.3, color=COLORS["border"], left=pct)
-        ax4.text(0, 3.75, f"Уровень сигнала: {pct}%", fontsize=8.5, color=COLORS["text"])
+        sig_lbl = f"Уровень сигнала: {pct}%"
+        if finbert:
+            sig_lbl += (
+                f"  (= {str(finbert.get('label', '')).upper()} "
+                f"@ {str(finbert.get('confidence', '')).upper()})"
+            )
+        ax4.text(0, 3.75, sig_lbl, fontsize=8.5, color=COLORS["text"])
 
         macro = prices.get("MACRO", {})
         fng   = macro.get("fng", {}) if isinstance(macro, dict) else {}

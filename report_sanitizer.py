@@ -30,6 +30,9 @@ _LINE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"Fear\s*&\s*Greed.{0,120}историческ", re.IGNORECASE),
     re.compile(r"12/100.{0,80}историческ", re.IGNORECASE),
     re.compile(r"точк[ауы]\s+входа.{0,40}историческ", re.IGNORECASE),
+    re.compile(r"история\s+(показывает|учит|доказывает)", re.IGNORECASE),
+    re.compile(r"как\s+показывает\s+практика", re.IGNORECASE),
+    re.compile(r"практика\s+показывает", re.IGNORECASE),
 ]
 
 

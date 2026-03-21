@@ -114,6 +114,27 @@ def debate_plain_text(text: str) -> str:
     return t.strip()
 
 
+def strip_digest_summary_text(text: str) -> str:
+    """Убирает ###, **, ` и линии --- из краткой выжимки Bull/Bear в шапке дайджеста."""
+    if not text or not text.strip():
+        return text
+    out: list[str] = []
+    for line in text.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if re.match(r"^[-_*═─]{3,}\s*$", s):
+            continue
+        s = re.sub(r"^#{1,6}\s*", "", s)
+        s = re.sub(r"\*+", "", s)
+        s = re.sub(r"_+", "", s)
+        s = re.sub(r"`+", "", s)
+        s = s.strip()
+        if s:
+            out.append(s)
+    return "\n".join(out) if out else text.strip()
+
+
 def split_message(text: str, max_len: int = 3800) -> list:
     # Агрессивно чистим весь markdown — убираем *, _, `, #
     import re
@@ -374,9 +395,9 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
             elif in_bear and len(bear_lines) < 3:
                 bear_lines.append(stripped)
         if bull_lines:
-            bull_summary = "\n".join(bull_lines)
+            bull_summary = strip_digest_summary_text("\n".join(bull_lines))
         if bear_lines:
-            bear_summary = "\n".join(bear_lines)
+            bear_summary = strip_digest_summary_text("\n".join(bear_lines))
 
     # Шапка — первое сообщение
     header = (
