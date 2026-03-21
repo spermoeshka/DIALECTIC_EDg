@@ -53,9 +53,6 @@ class DebateHistory:
 
 
 
-print("🔥 VERSION CHECK V7.0")
-
-
 COMMON_GROUNDING_RULE = """
 
 🚨 АНТИГАЛЛЮЦИНАЦИОННЫЙ ПРОТОКОЛ — НАРУШЕНИЕ = ДИСКВАЛИФИКАЦИЯ:

@@ -7,7 +7,9 @@ Dialectic Edge v6.0 — UX апгрейд.
 
 import asyncio
 import logging
+import re
 from datetime import datetime
+from typing import Optional, Tuple
 
 try:
     from dotenv import load_dotenv
@@ -140,6 +142,33 @@ def signal_to_stars(confidence) -> str:
     return "⭐" * stars + "☆" * (5 - stars)
 
 
+# Маркеры должны совпадать с `DebateOrchestrator._format_report` в agents.py
+# и со старыми отчётами в кэше.
+_SYNTH_START_MARKERS = (
+    "⚖️ *ВЕРДИКТ И ТОРГОВЫЙ ПЛАН*",
+    "⚖️ ВЕРДИКТ И ТОРГОВЫЙ ПЛАН",
+    "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*",
+    "⚖️ ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ",
+    "ИТОГОВЫЙ СИНТЕЗ",
+)
+_DEBATE_START_MARKERS = (
+    "🗣 *ДЕБАТЫ АГЕНТОВ*",
+    "🗣 *ХОД ДЕБАТОВ*",
+    "🗣 ХОД ДЕБАТОВ",
+    "🗣 ДЕБАТЫ АГЕНТОВ",
+)
+_ROUND_HEADER_RE = re.compile(r"──\s*Раунд\s+\d+")
+
+
+def _find_first_marker(text: str, markers: Tuple[str, ...]) -> Optional[Tuple[int, str]]:
+    best: Optional[Tuple[int, str]] = None
+    for m in markers:
+        i = text.find(m)
+        if i != -1 and (best is None or i < best[0]):
+            best = (i, m)
+    return best
+
+
 # ─── Парсинг отчёта на части ──────────────────────────────────────────────────
 
 def parse_report_parts(report: str) -> dict:
@@ -171,28 +200,23 @@ def parse_report_parts(report: str) -> dict:
             report = report[:idx]
             break
 
-    # Вытаскиваем синтез — пробуем несколько вариантов маркера
-    for synth_marker in [
-        "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*",
-        "⚖️ ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ",
-        "ИТОГОВЫЙ СИНТЕЗ",
-    ]:
-        if synth_marker in report:
-            idx = report.find(synth_marker)
-            parts["synthesis"] = report[idx:].strip()
-            report = report[:idx]
-            break
+    # Вытаскиваем синтез — пробуем несколько вариантов маркера (v7 отчёты + старые)
+    synth_hit = _find_first_marker(report, _SYNTH_START_MARKERS)
+    if synth_hit:
+        idx, _ = synth_hit
+        parts["synthesis"] = report[idx:].strip()
+        report = report[:idx]
 
     # Вытаскиваем раунды
-    round_markers = [
+    round_markers_legacy = (
         "── Раунд 1:",
         "── Раунд 2:",
         "── Раунд 3:",
-    ]
+    )
 
-    debate_marker = "🗣 *ДЕБАТЫ АГЕНТОВ*"
-    if debate_marker in report:
-        debate_idx = report.find(debate_marker)
+    debate_hit = _find_first_marker(report, _DEBATE_START_MARKERS)
+    if debate_hit:
+        debate_idx, _ = debate_hit
         parts["header"] = report[:debate_idx].strip()
         debate_section = report[debate_idx:]
 
@@ -200,7 +224,9 @@ def parse_report_parts(report: str) -> dict:
         current_round = ""
         current_round_num = 0
         for line in debate_section.split("\n"):
-            is_round_header = any(m in line for m in round_markers)
+            is_round_header = bool(_ROUND_HEADER_RE.search(line)) or any(
+                m in line for m in round_markers_legacy
+            )
             if is_round_header:
                 if current_round.strip() and current_round_num > 0:
                     parts["rounds"].append(current_round.strip())
@@ -238,6 +264,9 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
         bull_lines, bear_lines = [], []
         in_bull = in_bear = False
         for line in lines:
+            if _ROUND_HEADER_RE.search(line):
+                in_bull = in_bear = False
+                continue
             if "🐂 Bull" in line:
                 in_bull, in_bear = True, False
                 continue
@@ -274,12 +303,8 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
     # Берём весь контент после шапки из полного отчёта
     # Ищем начало синтеза в полном отчёте
     full = parts.get("full", "")
-    synth_start = -1
-    for marker in ["⚖️ *ИТОГОВЫЙ СИНТЕЗ", "⚖️ ИТОГОВЫЙ СИНТЕЗ", "ИТОГОВЫЙ СИНТЕЗ"]:
-        idx = full.find(marker)
-        if idx != -1:
-            synth_start = idx
-            break
+    synth_hit = _find_first_marker(full, _SYNTH_START_MARKERS)
+    synth_start = synth_hit[0] if synth_hit else -1
 
     if synth_start != -1:
         synth_and_rest = full[synth_start:]
