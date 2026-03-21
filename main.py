@@ -418,6 +418,36 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
     return messages
 
 
+async def send_debates_attachment(chat_id: int, rounds: list[str]) -> None:
+    """
+    Все раунды одним .txt в чат — не зависит от RAM/Redis/SQLite после редеплоя Railway.
+    Пользователь всегда может открыть файл в истории сообщений.
+    """
+    if not rounds:
+        return
+    blocks: list[str] = []
+    for i, r in enumerate(rounds, 1):
+        blocks.append(f"{'═' * 12} Раунд {i} {'═' * 12}\n\n{debate_plain_text(r)}")
+    body = "\n\n".join(blocks)
+    raw = body.encode("utf-8")
+    max_bytes = 48 * 1024 * 1024  # лимит Telegram ~50 MiB
+    if len(raw) > max_bytes:
+        raw = raw[:max_bytes]
+        body = raw.decode("utf-8", errors="ignore") + "\n\n…файл обрезан по лимиту Telegram"
+        raw = body.encode("utf-8")
+    fn = f"dialectic_debates_{datetime.now().strftime('%Y-%m-%d_%H%M')}.txt"
+    try:
+        await bot.send_document(
+            chat_id,
+            document=BufferedInputFile(raw, filename=fn),
+            caption=(
+                "📖 Все раунды дебатов в файле — остаётся в этом чате даже если бот перезапустился."
+            ),
+        )
+    except Exception as e:
+        logger.warning("Не удалось отправить файл дебатов: %s", e)
+
+
 async def send_digest_chart(
     chat_id: int,
     report: str,
@@ -475,11 +505,16 @@ async def send_daily_digest_bundle(
         await asyncio.sleep(0.3)
     await bot.send_message(
         chat_id,
-        "Полный анализ выше",
+        "Полный анализ выше.\n"
+        "📎 Сразу после этой кнопки придёт файл со всеми дебатами — он не пропадёт при рестарте бота.",
         reply_markup=main_report_keyboard(
             user_id, has_debates=bool(debate_cache.get(user_id, {}).get("rounds")),
         ),
     )
+    rounds_out = debate_cache.get(user_id, {}).get("rounds") or []
+    if rounds_out:
+        await asyncio.sleep(0.25)
+        await send_debates_attachment(chat_id, rounds_out)
 
 
 def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
@@ -589,14 +624,13 @@ async def handle_debate_page(callback: CallbackQuery):
 
     if not cache:
         logger.warning(
-            "debate hydrate miss user_id=%s — RAM пуст, Redis/SQLite/JSON недоступны с этого воркера "
-            "(часто: два инстанса бота → TelegramConflict, или эфемерный диск без Redis). "
-            "Railway: один реплика + REDIS_URL или постоянный volume для БД.",
+            "debate hydrate miss user_id=%s — кэш пуст (редеплой/другой воркер). "
+            "Файл .txt с дебатами уже в чате под дайджестом.",
             user_id,
         )
         await callback.answer(
-            "❌ Дебаты не найдены (рестарт бота или второй инстанс). "
-            "Задай REDIS_URL на Railway или /daily заново.",
+            "Дебаты в файле dialectic_debates_….txt — пролистай чат ниже кнопок. "
+            "Кнопки листания работают только пока бот не перезапускали.",
             show_alert=True,
         )
         return
