@@ -121,22 +121,41 @@ def _parse_russia_items(text: str, marker: str) -> list:
     """
     Парсит блоки возможностей/рисков из Russia Edge отчёта.
     Bullet: •, -, –, *; рейтинг: Уверенность/Вероятность ВЫСОКАЯ/СРЕДНЯЯ/НИЗКАЯ.
+    Учитывает: вариацию эмодзи (FE0F), Markdown *вокруг* слова, «Уверенность — ВЫСОКАЯ».
     """
+    text = (text or "").replace("\ufe0f", "")
     items      = []
     rating_map = {"ВЫСОКАЯ": 3, "СРЕДНЯЯ": 2, "НИЗКАЯ": 1}
-    bullet_re  = re.compile(r"^[\s]*[•\-–*]\s+", re.UNICODE)
+    bullet_re  = re.compile(r"^[\s]*[•\-–*·▪]\s+", re.UNICODE)
+    rating_re  = re.compile(
+        r"(уверенность|вероятность)\s*[:：—–\-]\s*",
+        re.IGNORECASE,
+    )
 
-    start = text.find(marker)
+    if marker == "🟢":
+        start = text.find("🟢 ВОЗМОЖНОСТИ")
+        if start == -1:
+            start = text.find("🟢")
+    else:
+        start = text.find("🔴 РИСКИ")
+        if start == -1:
+            start = text.find("🔴")
+
     if start == -1:
         return items
 
-    other_marker = "🔴" if marker == "🟢" else "🟢"
-    end_markers  = [other_marker, "🇷🇺 ИТОГ", "🤝 Честно"]
-    end          = len(text)
-    for em in end_markers:
-        pos = text.find(em, start + 5)
-        if pos != -1 and pos < end:
-            end = pos
+    if marker == "🟢":
+        end = text.find("🔴 РИСКИ", start + 1)
+        if end == -1:
+            end = text.find("🔴", start + 2)
+        if end == -1:
+            end = len(text)
+    else:
+        end = len(text)
+        for em in ("🇷🇺 ИТОГ", "💡 ТОП-3", "⚖️ БАЛАНС", "🤝 Честно", "🟢 ВОЗМОЖНОСТИ"):
+            pos = text.find(em, start + 5)
+            if pos != -1 and pos < end:
+                end = pos
 
     block = text[start:end]
     lines = block.split("\n")
@@ -144,24 +163,32 @@ def _parse_russia_items(text: str, marker: str) -> list:
     current_name = None
     for line in lines:
         stripped = line.strip()
+        if not stripped:
+            continue
+        norm = re.sub(r"[*_`]", "", stripped)
 
-        # Bullet line: " • Название" или " - Название" или "– Название"
-        if bullet_re.match(stripped) and len(stripped) > 4:
-            raw = bullet_re.sub("", stripped).strip()
+        if bullet_re.match(norm) and len(norm) > 4:
+            raw = bullet_re.sub("", norm).strip()
             raw = re.sub(r"[*_`]", "", raw)
-            raw = "".join(c for c in raw if c.isalnum() or c in " ,:.()/+-%" or "\u0400" <= c <= "\u04FF")
+            raw = "".join(
+                c for c in raw
+                if c.isalnum() or c in " ,:.()/+-%" or "\u0400" <= c <= "\u04FF"
+            )
             raw = raw.strip()
             raw = re.sub(r"\s*\([^)]+\)\s*$", "", raw).strip()
             if raw:
                 current_name = raw[:30]
 
-        if current_name and re.search(r"(Уверенность|Вероятность)\s*:\s*\w+", stripped, re.IGNORECASE):
-            for key, val in rating_map.items():
-                if key in stripped.upper():
-                    if val >= 1:  # включаем и НИЗКАЯ для полноты
-                        items.append({"name": current_name, "rating": val})
-                    current_name = None
-                    break
+        if not current_name:
+            continue
+        if not rating_re.search(norm):
+            continue
+        up = norm.upper()
+        for key, val in rating_map.items():
+            if key in up:
+                items.append({"name": current_name, "rating": val})
+                current_name = None
+                break
 
     return items
 

@@ -1087,16 +1087,18 @@ async def cmd_russia(message: Message):
         )
         return
 
-    # Нужен глобальный анализ как основа
-    global_report = ""
+    # Нужен глобальный анализ как основа (last_report + fallback на отчёт этого user_id с /daily)
     cached = storage.get_cached_report()
-    if cached:
+    global_report = ""
+    if cached and isinstance(cached.get("report"), str):
         global_report = cached["report"]
-    else:
-        global_report = "Глобальный анализ пока не готов. Запусти /daily сначала."
+    if not global_report.strip():
+        ur = storage.get_user_last_cached_report(user_id)
+        if isinstance(ur, str) and ur.strip():
+            global_report = ur
 
-    # Если нет кэша /daily — предлагаем выбор
-    if not storage.get_cached_report():
+    # Если нет актуального дайджеста — предлагаем выбор
+    if not global_report.strip():
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(
                 text="✅ Сначала запущу /daily",

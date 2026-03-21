@@ -66,6 +66,8 @@ class Storage:
 
     def get_cached_report(self) -> dict | None:
         """Возвращает кэшированный отчёт, если он ещё актуален."""
+        # Всегда читаем с диска: на Railway несколько воркеров / ephemeral — память процесса устаревает.
+        self.reload_from_disk()
         cached = self._data.get("last_report")
         if not cached:
             return None
