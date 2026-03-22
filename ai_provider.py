@@ -59,7 +59,7 @@ GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip() or "gemin
 
 # ── Cerebras (бесплатно!) ───────────────────────────────────────────────────────
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
-CEREBRAS_MODEL   = os.getenv("CEREBRAS_MODEL", "llama-3.3-70b").strip() or "llama-3.3-70b"
+CEREBRAS_MODEL   = os.getenv("CEREBRAS_MODEL", "llama-3.1-70b").strip() or "llama-3.1-70b"
 CEREBRAS_URL     = "https://api.cerebras.ai/v1/chat/completions"
 
 # ── Трекинг моделей для честного лейбла в отчёте ─────────────────────────────
@@ -67,7 +67,7 @@ MODELS_USED: dict = {}  # {"bull": "Mistral Small", "synth": "Mistral Large", ..
 
 def _track_model(agent_key: str, provider: str, model: str):
     labels = {
-        "llama-3.3-70b":                          "Cerebras/Llama 3.3 70B 🚀",
+        "llama-3.1-70b":                          "Cerebras/Llama 3.1 70B 🚀",
         "mistral-small-latest":                    "Mistral Small",
         "mistral-large-latest":                    "Mistral Large",
         "llama-3.3-70b-versatile":                 "Groq/Llama 3.3 70B",
