@@ -158,10 +158,10 @@ def _resolve_agent_models() -> dict:
              "bear": {"provider": "gemini", "model": GEMINI_MODEL},
              "synth": {"provider": "gemini", "model": GEMINI_MODEL}}
     elif want == "mixed":
-        bull_p = "cerebras"   if _can_use_primary("cerebras")   else "groq" if _can_use_primary("groq") else "mistral"
+        bull_p = "groq"       if _can_use_primary("groq")       else "cerebras" if _can_use_primary("cerebras") else "mistral"
         bear_p = "groq"       if _can_use_primary("groq")       else "cerebras" if _can_use_primary("cerebras") else "mistral"
         ver_p  = "cerebras"   if _can_use_primary("cerebras")   else "openrouter" if _can_use_primary("openrouter") else "groq"
-        syn_p  = "mistral"    if _can_use_primary("mistral")    else "cerebras" if _can_use_primary("cerebras") else "groq"
+        syn_p  = "mistral"    if _can_use_primary("mistral")    else "groq" if _can_use_primary("groq") else "cerebras"
     
         def _model_for(p):
             if p == "cerebras":
