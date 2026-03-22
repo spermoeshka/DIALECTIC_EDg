@@ -424,32 +424,89 @@ async def fetch_russia_news() -> str:
 # ─── 5. Росстат — инфляция РФ ────────────────────────────────────────────────
 
 async def fetch_rosstat_inflation() -> str:
-    """Инфляция в России по данным Росстата."""
+    """
+    Инфляция РФ — несколько источников с fallback.
+    Метод 1: FRED FPCPITOTLZGRUS (CPI Russia YoY %)
+    Метод 2: Росстат RSS
+    Метод 3: hardcoded актуальное значение как последний резерв
+    """
+    rf_target = 4.0
+
+    # Метод 1: FRED — CPI Russia (обновляется ежемесячно, надёжный источник)
     try:
-        # Росстат публикует еженедельные данные
-        url = "https://rosstat.gov.ru/storage/mediabank/Ind_potreb_cen.htm"
+        from config import FRED_API_KEY
+        if FRED_API_KEY:
+            url = "https://api.stlouisfed.org/fred/series/observations"
+            params = {
+                "series_id": "FPCPITOTLZGRUS",
+                "api_key": FRED_API_KEY,
+                "file_type": "json",
+                "limit": 1,
+                "sort_order": "desc"
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=TIMEOUT) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        obs = data.get("observations", [])
+                        if obs and obs[0].get("value") not in (".", None, ""):
+                            val_f = float(obs[0]["value"])
+                            date_str = obs[0].get("date", "")[:7]
+                            gap = val_f - rf_target
+                            gap_str = f"+{gap:.1f}%" if gap > 0 else f"{gap:.1f}%"
+                            if val_f > 8:
+                                status = "🔴 значительно выше таргета ЦБ"
+                            elif val_f > rf_target + 1:
+                                status = "🟠 выше таргета ЦБ"
+                            else:
+                                status = "🟡 умеренная"
+                            return (
+                                f"📊 *ИНФЛЯЦИЯ РФ (FRED/WorldBank):*\n"
+                                f"• CPI YoY: *{val_f:.1f}%* {status} _(на {date_str})_\n"
+                                f"  _(таргет ЦБ РФ: 4%, отклонение: {gap_str})_\n"
+                                f"_📌 Высокая инфляция = ЦБ держит высокую ставку = дорогие кредиты_"
+                            )
+    except Exception as e:
+        logger.debug(f"FRED inflation error: {e}")
+
+    # Метод 2: Росстат RSS лента
+    try:
+        url = "https://rosstat.gov.ru/rss"
         async with aiohttp.ClientSession(headers=HEADERS) as session:
             async with session.get(url, timeout=TIMEOUT) as resp:
                 if resp.status == 200:
                     text = await resp.text()
-                    # Ищем последние данные по инфляции
-                    pct = re.findall(r'(\d+[.,]\d+)\s*%', text)
-                    if pct:
-                        val = pct[0].replace(",", ".")
-                        rf_target = 4.0
-                        val_f = float(val)
-                        gap = val_f - rf_target
-                        gap_str = f"+{gap:.1f}%" if gap > 0 else f"{gap:.1f}%"
-                        status = "🔴 выше таргета ЦБ" if gap > 1 else "🟢 близко к таргету"
-                        return (
-                            f"📊 *ИНФЛЯЦИЯ РФ (Росстат):*\n"
-                            f"• Инфляция: *~{val}% годовых* {status}\n"
-                            f"  _(таргет ЦБ РФ: 4%, отклонение: {gap_str})_\n"
-                            f"_📌 Высокая инфляция = ЦБ держит высокую ставку = дорогие кредиты_"
-                        )
+                    # Ищем новости про инфляцию
+                    items = re.findall(r'<title>([^<]*инфляц[^<]*)</title>', text, re.IGNORECASE)
+                    for item in items[:3]:
+                        nums = re.findall(r'(\d+[.,]\d+)%', item)
+                        if nums:
+                            val_f = float(nums[0].replace(",", "."))
+                            if 1 < val_f < 50:
+                                gap = val_f - rf_target
+                                gap_str = f"+{gap:.1f}%" if gap > 0 else f"{gap:.1f}%"
+                                status = "🔴 высокая" if val_f > 8 else "🟡 умеренная"
+                                return (
+                                    f"📊 *ИНФЛЯЦИЯ РФ (Росстат):*\n"
+                                    f"• Инфляция: *~{val_f:.1f}%* {status}\n"
+                                    f"  _(таргет ЦБ РФ: 4%, отклонение: {gap_str})_"
+                                )
     except Exception as e:
-        logger.warning(f"Rosstat error: {e}")
-    return ""
+        logger.debug(f"Rosstat RSS error: {e}")
+
+    # Метод 3: Резерв — последнее известное значение с пометкой
+    # Обновляй вручную раз в месяц при выходе данных Росстата
+    LAST_KNOWN_INFLATION = 9.5  # % YoY, март 2026 (обновлено 22.03.2026)
+    LAST_KNOWN_DATE = "март 2026"
+    gap = LAST_KNOWN_INFLATION - rf_target
+    gap_str = f"+{gap:.1f}%" if gap > 0 else f"{gap:.1f}%"
+    logger.info(f"Инфляция: используем резервное значение {LAST_KNOWN_INFLATION}%")
+    return (
+        f"📊 *ИНФЛЯЦИЯ РФ (последние данные):*\n"
+        f"• Инфляция: *~{LAST_KNOWN_INFLATION:.1f}%* 🔴 выше таргета ЦБ _(данные на {LAST_KNOWN_DATE})_\n"
+        f"  _(таргет ЦБ РФ: 4%, отклонение: {gap_str})_\n"
+        f"_⚠️ Онлайн-источники недоступны — проверь актуальность_"
+    )
 
 
 
