@@ -706,15 +706,25 @@ class BearSkeptic(BaseAgent):
     async def respond_counter(self, news_context: str, history: DebateHistory, round_num: int) -> str:
         bull_counter       = history.last_message_by("Bull")
         verifier_notes     = history.last_message_by("Verifier")
+        
+        # 🔴 КРИТИЧНО: передаём Bear свои риски из раунда 1 — чтобы она не забыла их
+        bear_first = ""
+        for m in history.messages:
+            if "Bear" in m.agent and m.round_num == 1:
+                bear_first = m.content
+                break
+        
         extra = ""
+        if bear_first:
+            extra += f"🔴 ТВО­И НЕИЗМЕНЯЕМЫЕ РИСКИ ИЗ РАУНДА 1 (ЗАЩИЩАЙ ИХ):\n{bear_first[:1200]}\n\n"
         if bull_counter:
-            extra += f"Ответ Bull:\n{bull_counter[:1000]}\n\n"
+            extra += f"Ответ Bull в раунде {round_num-1}:\n{bull_counter[:800]}\n\n"
         if verifier_notes:
             import re as _re
             hall = _re.findall(r"ГАЛЛЮЦИНАЦИЯ[^\n]*", verifier_notes)
             if hall:
-                extra += "Галлюцинации Bull (Verifier, используй):\n" + "\n".join(hall[:5]) + "\n\n"
-            extra += f"Verifier:\n{verifier_notes[:500]}"
+                extra += "Галлюцинации Bull (Verifier, используй как оружие):\n" + "\n".join(hall[:5]) + "\n\n"
+            extra += f"Verifier результаты:\n{verifier_notes[:400]}"
         self.system_prompt = BEAR_COUNTER_SYSTEM
         result             = await self.respond(news_context, history, round_num, extra)
         self.system_prompt = BEAR_SYSTEM
