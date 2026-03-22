@@ -3,12 +3,10 @@ ai_provider.py — Мультипровайдер с роутингом по а�
 
 Переменные окружения (Railway / .env):
   AI_DEBATE_PRIMARY — кто первым отвечает в дебатах:
-      mistral (по умолчанию) | groq | openrouter | together | gemini
-  GROQ_MODEL, OPENROUTER_MODEL, TOGETHER_MODEL — модели для соответствующего primary
-  OPENROUTER_SYNTH_MODEL — опционально, иначе как OPENROUTER_MODEL
-  MISTRAL_SYNTH_MODEL — для synth при primary=mistral (по умолчанию mistral-large-latest)
+      openrouter | together | groq | mistral | gemini | cerebras | mixed
+  Все свободные модели! OPENROUTER_API_KEY и TOGETHER_API_KEY обязательны.
 
-Fallback после ошибки primary: остальные провайдеры по цепочке (без повтора того же API).
+Fallback цепь: Cerebras → OpenRouter → Together → Groq → Mistral → Gemini
 """
 
 import logging
@@ -25,23 +23,23 @@ TIMEOUT = aiohttp.ClientTimeout(total=180)
 
 # ── Ключи ──────────────────────────────────────────────────────────────────────
 MISTRAL_API_KEY    = os.getenv("MISTRAL_API_KEY", "")
-MISTRAL_API_KEY_2  = os.getenv("MISTRAL_API_KEY_2", "")   # резервный Mistral
+MISTRAL_API_KEY_2  = os.getenv("MISTRAL_API_KEY_2", "")
 MISTRAL_MODEL      = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 MISTRAL_URL        = "https://api.mistral.ai/v1/chat/completions"
 
 OPENROUTER_API_KEY   = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_API_KEY_2 = os.getenv("OPENROUTER_API_KEY_2", "")  # резервный OpenRouter
+OPENROUTER_API_KEY_2 = os.getenv("OPENROUTER_API_KEY_2", "")
 OPENROUTER_URL       = "https://openrouter.ai/api/v1/chat/completions"
 
 TOGETHER_API_KEY   = os.getenv("TOGETHER_API_KEY", "")
-TOGETHER_API_KEY_2 = os.getenv("TOGETHER_API_KEY_2", "")  # резервный Together
+TOGETHER_API_KEY_2 = os.getenv("TOGETHER_API_KEY_2", "")
 TOGETHER_URL       = "https://api.together.xyz/v1/chat/completions"
 
-GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
-GROQ_API_KEY_2     = os.getenv("GROQ_API_KEY_2", "")   # второй аккаунт
-GROQ_API_KEY_3     = os.getenv("GROQ_API_KEY_3", "")   # третий аккаунт
-GROQ_URL           = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL         = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
+GROQ_API_KEY_2 = os.getenv("GROQ_API_KEY_2", "")
+GROQ_API_KEY_3 = os.getenv("GROQ_API_KEY_3", "")
+GROQ_URL       = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
 
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"
@@ -55,21 +53,25 @@ TOGETHER_MODEL = os.getenv(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip() or "gemini-1.5-flash"
 
-# Cerebras — бесплатный, очень быстрый
+# ── Cerebras (бесплатный, ~1000 токен/сек!) ───────────────────────────────────
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+# ФИX 1: правильная модель (llama-3.1-70b-instruct не существует → 404)
 CEREBRAS_MODEL   = os.getenv("CEREBRAS_MODEL", "llama-3.3-70b").strip() or "llama-3.3-70b"
 CEREBRAS_URL     = "https://api.cerebras.ai/v1/chat/completions"
 
-
-# ── Трекинг моделей для честного лейбла в отчёте ─────────────────────────────
-MODELS_USED: dict = {}  # {"bull": "Mistral Small", "synth": "Mistral Large", ...}
+# ── Трекинг моделей ───────────────────────────────────────────────────────────
+MODELS_USED: dict = {}
 
 def _track_model(agent_key: str, provider: str, model: str):
     labels = {
+        # ФИX 2: добавлена правильная метка для Cerebras
+        "llama-3.3-70b":                           "Cerebras/Llama 3.3 70B 🚀",
+        "llama-3.1-70b-instruct":                  "Cerebras/Llama 3.1 70B",
         "mistral-small-latest":                    "Mistral Small",
         "mistral-large-latest":                    "Mistral Large",
         "llama-3.3-70b-versatile":                 "Groq/Llama 3.3 70B",
         "meta-llama/llama-3.3-70b-instruct:free":  "OpenRouter/Llama 3.3 70B",
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free": "Together/Llama 3.3 70B",
         "google/gemma-3-27b-it:free":              "OpenRouter/Gemma 3 27B",
     }
     label = labels.get(model, f"{provider}/{model}")
@@ -78,151 +80,112 @@ def _track_model(agent_key: str, provider: str, model: str):
 
 
 def _debate_primary_env() -> str:
-    return os.getenv("AI_DEBATE_PRIMARY", "mistral").strip().lower() or "mistral"
+    return os.getenv("AI_DEBATE_PRIMARY", "mixed").strip().lower() or "mixed"
 
 
 def _can_use_primary(name: str) -> bool:
-    if name == "mistral":
-        return bool(MISTRAL_API_KEY or MISTRAL_API_KEY_2)
-    if name == "groq":
-        return bool(GROQ_API_KEY or GROQ_API_KEY_2 or GROQ_API_KEY_3)
-    if name == "openrouter":
-        return bool(OPENROUTER_API_KEY or OPENROUTER_API_KEY_2)
-    if name == "together":
-        return bool(TOGETHER_API_KEY or TOGETHER_API_KEY_2)
-    if name == "gemini":
-        return bool(GEMINI_API_KEY)
-    if name == "cerebras":
-        return bool(CEREBRAS_API_KEY)
+    if name == "cerebras":  return bool(CEREBRAS_API_KEY)
+    if name == "mistral":   return bool(MISTRAL_API_KEY or MISTRAL_API_KEY_2)
+    if name == "groq":      return bool(GROQ_API_KEY or GROQ_API_KEY_2 or GROQ_API_KEY_3)
+    if name == "openrouter":return bool(OPENROUTER_API_KEY or OPENROUTER_API_KEY_2)
+    if name == "together":  return bool(TOGETHER_API_KEY or TOGETHER_API_KEY_2)
+    if name == "gemini":    return bool(GEMINI_API_KEY)
     return False
 
 
 def _resolve_agent_models() -> dict:
-    """Кто первым обрабатывает дебаты (остальное — fallback в _call_best_available)."""
     want = _debate_primary_env()
-    if want not in ("mistral", "groq", "openrouter", "together", "gemini", "cerebras", "mixed"):
-        logger.warning("AI_DEBATE_PRIMARY=%s неизвестен — использую mistral", want)
-        want = "mistral"
-    if not _can_use_primary(want):
-        logger.warning(
-            "AI_DEBATE_PRIMARY=%s недоступен (нет ключа) — откат на mistral/groq по наличию ключей",
-            want,
-        )
-        if _can_use_primary("mistral"):
-            want = "mistral"
-        elif _can_use_primary("groq"):
-            want = "groq"
-        elif _can_use_primary("openrouter"):
-            want = "openrouter"
-        elif _can_use_primary("together"):
-            want = "together"
-        elif _can_use_primary("gemini"):
-            want = "gemini"
-        elif _can_use_primary("cerebras"):
-            want = "cerebras"
-        else:
-            want = next(
-                (n for n in ("groq", "openrouter", "together", "gemini", "mistral")
-                 if _can_use_primary(n)),
-                "mistral",
-            )
+    valid = ("openrouter", "together", "mistral", "groq", "gemini", "cerebras", "mixed")
+    if want not in valid:
+        logger.warning("AI_DEBATE_PRIMARY=%s неизвестен — использую mixed", want)
+        want = "mixed"
+    if want != "mixed" and not _can_use_primary(want):
+        logger.warning("AI_DEBATE_PRIMARY=%s недоступен — откат на следующий", want)
+        for p in ("cerebras", "openrouter", "together", "groq", "mistral", "gemini"):
+            if _can_use_primary(p):
+                want = p
+                break
 
-    mm = os.getenv("MISTRAL_MODEL", MISTRAL_MODEL).strip() or MISTRAL_MODEL
+    mm    = os.getenv("MISTRAL_MODEL", MISTRAL_MODEL).strip() or MISTRAL_MODEL
     syn_m = os.getenv("MISTRAL_SYNTH_MODEL", "mistral-large-latest").strip() or "mistral-large-latest"
 
-    if want == "groq":
-        m = {"bull": {"provider": "groq", "model": GROQ_MODEL},
-             "verifier": {"provider": "groq", "model": GROQ_MODEL},
-             "bear": {"provider": "groq", "model": GROQ_MODEL},
-             "synth": {"provider": "groq", "model": GROQ_MODEL}}
-    elif want == "openrouter":
-        m = {"bull": {"provider": "openrouter", "model": OPENROUTER_MODEL},
-             "verifier": {"provider": "openrouter", "model": OPENROUTER_MODEL},
-             "bear": {"provider": "openrouter", "model": OPENROUTER_MODEL},
-             "synth": {"provider": "openrouter", "model": OPENROUTER_SYNTH_MODEL}}
-    elif want == "together":
-        m = {"bull": {"provider": "together", "model": TOGETHER_MODEL},
-             "verifier": {"provider": "together", "model": TOGETHER_MODEL},
-             "bear": {"provider": "together", "model": TOGETHER_MODEL},
-             "synth": {"provider": "together", "model": TOGETHER_MODEL}}
-    elif want == "gemini":
-        m = {"bull": {"provider": "gemini", "model": GEMINI_MODEL},
-             "verifier": {"provider": "gemini", "model": GEMINI_MODEL},
-             "bear": {"provider": "gemini", "model": GEMINI_MODEL},
-             "synth": {"provider": "gemini", "model": GEMINI_MODEL}}
-    elif want == "cerebras":
-        m = {"bull":     {"provider": "cerebras", "model": CEREBRAS_MODEL},
-             "bear":     {"provider": "cerebras", "model": CEREBRAS_MODEL},
-             "verifier": {"provider": "cerebras", "model": CEREBRAS_MODEL},
-             "synth":    {"provider": "mistral",  "model": syn_m}}
+    def _model_for(p):
+        return {
+            "cerebras":   CEREBRAS_MODEL,
+            "groq":       GROQ_MODEL,
+            "together":   TOGETHER_MODEL,
+            "openrouter": OPENROUTER_MODEL,
+            "mistral":    mm,
+            "gemini":     GEMINI_MODEL,
+        }.get(p, mm)
 
-    elif want == "mixed":
-        # Настоящая диалектика — каждый агент на СВОЁМ провайдере
-        # Bull    → Cerebras (быстрый, бесплатный, оптимист)
-        # Bear    → Groq     (агрессивный скептик)
-        # Verifier→ Together (педантичный факт-чекер)
-        # Synth   → Mistral Large (мудрый синтезатор)
-        def pick(pref_order):
-            for p in pref_order:
+    if want == "cerebras":
+        m = {a: {"provider": "cerebras", "model": CEREBRAS_MODEL}
+             for a in ("bull", "bear", "verifier", "synth")}
+    elif want == "openrouter":
+        m = {a: {"provider": "openrouter", "model": OPENROUTER_MODEL}
+             for a in ("bull", "bear", "verifier")}
+        m["synth"] = {"provider": "openrouter", "model": OPENROUTER_SYNTH_MODEL}
+    elif want == "together":
+        m = {a: {"provider": "together", "model": TOGETHER_MODEL}
+             for a in ("bull", "bear", "verifier", "synth")}
+    elif want == "groq":
+        m = {a: {"provider": "groq", "model": GROQ_MODEL}
+             for a in ("bull", "bear", "verifier", "synth")}
+    elif want == "gemini":
+        m = {a: {"provider": "gemini", "model": GEMINI_MODEL}
+             for a in ("bull", "bear", "verifier", "synth")}
+    elif want == "mistral":
+        m = {a: {"provider": "mistral", "model": mm}
+             for a in ("bull", "bear", "verifier")}
+        m["synth"] = {"provider": "mistral", "model": syn_m}
+    else:  # mixed — настоящая диалектика!
+        # ФИX 3: Cerebras первым для Bull (быстрый и бесплатный)
+        def pick(*prefs):
+            for p in prefs:
                 if _can_use_primary(p):
                     return p
             return "mistral"
 
-        bull_p = pick(["cerebras", "together", "openrouter", "groq", "mistral"])
-        bear_p = pick(["groq", "cerebras", "together", "openrouter", "mistral"])
-        ver_p  = pick(["together", "openrouter", "cerebras", "groq", "mistral"])
-        syn_p  = pick(["mistral", "groq", "cerebras"])
-
-        def model_for(p):
-            return {
-                "cerebras": CEREBRAS_MODEL,
-                "groq":     GROQ_MODEL,
-                "together": TOGETHER_MODEL,
-                "openrouter": OPENROUTER_MODEL,
-                "mistral":  mm,
-            }.get(p, mm)
+        bull_p = pick("cerebras", "openrouter", "together", "groq")
+        bear_p = pick("groq", "cerebras", "together", "openrouter")
+        ver_p  = pick("together", "openrouter", "cerebras", "groq")
+        syn_p  = pick("mistral", "groq", "cerebras")
 
         m = {
-            "bull":     {"provider": bull_p, "model": model_for(bull_p)},
-            "bear":     {"provider": bear_p, "model": model_for(bear_p)},
-            "verifier": {"provider": ver_p,  "model": model_for(ver_p)},
-            "synth":    {"provider": syn_p,  "model": syn_m if syn_p == "mistral" else model_for(syn_p)},
+            "bull":     {"provider": bull_p, "model": _model_for(bull_p)},
+            "bear":     {"provider": bear_p, "model": _model_for(bear_p)},
+            "verifier": {"provider": ver_p,  "model": _model_for(ver_p)},
+            "synth":    {"provider": syn_p,
+                         "model": syn_m if syn_p == "mistral" else _model_for(syn_p)},
         }
-        logger.info(f"Mixed режим: Bull={bull_p} Bear={bear_p} Verifier={ver_p} Synth={syn_p}")
+        logger.info(
+            "Mixed: Bull=%s Bear=%s Verifier=%s Synth=%s",
+            bull_p, bear_p, ver_p, syn_p
+        )
 
-    else:
-        m = {"bull": {"provider": "mistral", "model": mm},
-             "verifier": {"provider": "mistral", "model": mm},
-             "bear": {"provider": "mistral", "model": mm},
-             "synth": {"provider": "mistral", "model": syn_m}}
-
-    logger.info("Дебаты: первичный провайдер = %s (AI_DEBATE_PRIMARY)", want)
+    logger.info("Дебаты: первичный провайдер = %s", want)
     return m
 
 
 def get_models_summary() -> str:
     if not MODELS_USED:
         return "🐂 Bull | 🐻 Bear | 🔍 Verifier | ⚖️ Synth"
-    bull     = MODELS_USED.get("bull", "?")
-    bear     = MODELS_USED.get("bear", "?")
-    verifier = MODELS_USED.get("verifier", "?")
-    synth    = MODELS_USED.get("synth", "?")
     return (
-        f"🐂 Bull = {bull} | "
-        f"🐻 Bear = {bear} | "
-        f"🔍 Verifier = {verifier} | "
-        f"⚖️ Synth = {synth}"
+        f"🐂 Bull = {MODELS_USED.get('bull','?')} | "
+        f"🐻 Bear = {MODELS_USED.get('bear','?')} | "
+        f"🔍 Verifier = {MODELS_USED.get('verifier','?')} | "
+        f"⚖️ Synth = {MODELS_USED.get('synth','?')}"
     )
 
 
-# ── Модели по агентам (первый ход дебатов) ────────────────────────────────────
 AGENT_MODELS = _resolve_agent_models()
 
 _AGENT_MAX_TOKENS = {
-    "bull":     2500,   # увеличено — 4 возможности Russia Edge не обрезаются
-    "bear":     2500,   # увеличено — 4 риска Russia Edge не обрезаются
+    "bull":     2500,
+    "bear":     2500,
     "verifier": 1000,
-    "synth":    6000,   # полный синтез с эффектами 2-3 порядка
+    "synth":    6000,
 }
 
 
@@ -261,17 +224,32 @@ async def _call_openai_style(
 
 # ── Провайдеры ────────────────────────────────────────────────────────────────
 
+async def _call_cerebras(prompt: str, system: str, temperature: float,
+                         model: str = None, agent_key: str = None) -> str:
+    if not CEREBRAS_API_KEY:
+        raise ValueError("Нет CEREBRAS_API_KEY")
+    m = model or CEREBRAS_MODEL
+    result = await _call_openai_style(
+        CEREBRAS_URL, CEREBRAS_API_KEY, m,
+        prompt, system, temperature, "Cerebras",
+        agent_key=agent_key
+    )
+    if agent_key:
+        _track_model(agent_key, "Cerebras", m)
+    return result
+
+
 async def _call_groq(prompt: str, system: str, temperature: float,
                      model: str = None, agent_key: str = None) -> str:
-    """Groq#1 → Groq#2 при 429."""
-    if not GROQ_API_KEY and not GROQ_API_KEY_2 and not GROQ_API_KEY_3:
+    if not any([GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3]):
         raise ValueError("Нет GROQ_API_KEY")
 
     m = model or GROQ_MODEL
-    keys_to_try = []
-    if GROQ_API_KEY:   keys_to_try.append(("Groq#1", GROQ_API_KEY))
-    if GROQ_API_KEY_2: keys_to_try.append(("Groq#2", GROQ_API_KEY_2))
-    if GROQ_API_KEY_3: keys_to_try.append(("Groq#3", GROQ_API_KEY_3))
+    keys_to_try = [(n, k) for n, k in [
+        ("Groq#1", GROQ_API_KEY),
+        ("Groq#2", GROQ_API_KEY_2),
+        ("Groq#3", GROQ_API_KEY_3),
+    ] if k]
 
     last_err = None
     for key_name, key in keys_to_try:
@@ -287,8 +265,8 @@ async def _call_groq(prompt: str, system: str, temperature: float,
         except RuntimeError as e:
             err_s = str(e)
             if "429" in err_s:
-                current_idx = keys_to_try.index((key_name, key))
-                has_next = current_idx < len(keys_to_try) - 1
+                idx = keys_to_try.index((key_name, key))
+                has_next = idx < len(keys_to_try) - 1
                 if has_next:
                     logger.warning(f"{key_name} лимит → сразу пробую следующий ключ...")
                     last_err = e
@@ -297,12 +275,12 @@ async def _call_groq(prompt: str, system: str, temperature: float,
                     wait_m = re.search(r"try again in ([\d.]+)\s*s", err_s, re.I)
                     if wait_m:
                         sec = min(30.0, float(wait_m.group(1)) + 1.0)
-                        logger.warning("%s последний ключ — жду %.1fs...", key_name, sec)
+                        logger.warning(f"{key_name} последний ключ — жду {sec:.1f}s...")
                         await asyncio.sleep(sec)
                         try:
                             result = await _call_openai_style(
-                                GROQ_URL, key, m, prompt, system, temperature,
-                                key_name, agent_key=agent_key,
+                                GROQ_URL, key, m, prompt, system,
+                                temperature, key_name, agent_key=agent_key
                             )
                             if agent_key:
                                 _track_model(agent_key, key_name, m)
@@ -314,24 +292,23 @@ async def _call_groq(prompt: str, system: str, temperature: float,
                     last_err = e
                     continue
             raise
-    raise RuntimeError(f"Все Groq ключи исчерпаны. Последняя ошибка: {last_err}")
+    raise RuntimeError(f"Все Groq ключи исчерпаны: {last_err}")
 
 
 async def _call_mistral(prompt: str, system: str, temperature: float,
                         model: str = None, agent_key: str = None) -> str:
-    """Mistral с автопереключением KEY_1 → KEY_2 при 429."""
     m = model or MISTRAL_MODEL
-    keys_to_try = []
-    if MISTRAL_API_KEY:   keys_to_try.append(("Mistral#1", MISTRAL_API_KEY))
-    if MISTRAL_API_KEY_2: keys_to_try.append(("Mistral#2", MISTRAL_API_KEY_2))
+    keys_to_try = [(n, k) for n, k in [
+        ("Mistral#1", MISTRAL_API_KEY),
+        ("Mistral#2", MISTRAL_API_KEY_2),
+    ] if k]
     if not keys_to_try:
         raise ValueError("Нет MISTRAL_API_KEY")
     last_err = None
     for key_name, key in keys_to_try:
         try:
             result = await _call_openai_style(
-                MISTRAL_URL, key, m,
-                prompt, system, temperature, key_name,
+                MISTRAL_URL, key, m, prompt, system, temperature, key_name,
                 agent_key=agent_key
             )
             if agent_key:
@@ -354,37 +331,27 @@ _OR_HEADERS = {
 }
 
 
-async def _call_openrouter_model(
-    prompt: str,
-    system: str,
-    temperature: float,
-    model: str,
-    agent_key: str = None,
-) -> str:
-    """OpenRouter: KEY_1 → KEY_2 при 429/402."""
-    keys_try = []
-    if OPENROUTER_API_KEY:
-        keys_try.append(("OpenRouter", OPENROUTER_API_KEY))
-    if OPENROUTER_API_KEY_2:
-        keys_try.append(("OpenRouter#2", OPENROUTER_API_KEY_2))
+async def _call_openrouter_model(prompt: str, system: str, temperature: float,
+                                  model: str, agent_key: str = None) -> str:
+    keys_try = [(n, k) for n, k in [
+        ("OpenRouter", OPENROUTER_API_KEY),
+        ("OpenRouter#2", OPENROUTER_API_KEY_2),
+    ] if k]
     if not keys_try:
         raise ValueError("Нет OPENROUTER_API_KEY")
     last_err = None
     for key_name, key in keys_try:
         try:
             result = await _call_openai_style(
-                OPENROUTER_URL, key, model,
-                prompt, system, temperature, key_name,
-                extra_headers=_OR_HEADERS,
-                agent_key=agent_key,
+                OPENROUTER_URL, key, model, prompt, system, temperature,
+                key_name, extra_headers=_OR_HEADERS, agent_key=agent_key
             )
             if agent_key:
                 _track_model(agent_key, key_name, model)
             return result
         except RuntimeError as e:
-            err = str(e)
-            if "429" in err or "402" in err:
-                logger.warning("%s лимит OpenRouter — следующий ключ...", key_name)
+            if "429" in str(e) or "402" in str(e):
+                logger.warning(f"{key_name} лимит OpenRouter — следующий ключ...")
                 last_err = e
                 continue
             raise
@@ -395,8 +362,7 @@ async def _call_openrouter_llama(prompt: str, system: str, temperature: float,
                                   agent_key: str = None) -> str:
     return await _call_openrouter_model(
         prompt, system, temperature,
-        "meta-llama/llama-3.3-70b-instruct:free",
-        agent_key,
+        "meta-llama/llama-3.3-70b-instruct:free", agent_key
     )
 
 
@@ -404,33 +370,12 @@ async def _call_openrouter_gemma(prompt: str, system: str, temperature: float,
                                   agent_key: str = None) -> str:
     return await _call_openrouter_model(
         prompt, system, temperature,
-        "google/gemma-3-27b-it:free",
-        agent_key,
+        "google/gemma-3-27b-it:free", agent_key
     )
 
 
-async def _call_cerebras(prompt: str, system: str, temperature: float,
-                         agent_key: str = None) -> str:
-    """Cerebras — бесплатный, быстрый (~1000 токен/сек)."""
-    if not CEREBRAS_API_KEY:
-        raise RuntimeError("Нет CEREBRAS_API_KEY")
-    try:
-        result = await _call_openai_style(
-            CEREBRAS_URL, CEREBRAS_API_KEY, CEREBRAS_MODEL,
-            prompt, system, min(temperature, 1.0), "Cerebras",
-            agent_key=agent_key
-        )
-        if agent_key:
-            _track_model(agent_key, "Cerebras", CEREBRAS_MODEL)
-        return result
-    except RuntimeError as e:
-        logger.warning(f"Cerebras ❌: {e}")
-        raise
-
-
-async def _call_gemini(
-    prompt: str, system: str, temperature: float, agent_key: str = None
-) -> str:
+async def _call_gemini(prompt: str, system: str, temperature: float,
+                       agent_key: str = None) -> str:
     if not GEMINI_API_KEY:
         raise ValueError("Нет GEMINI_API_KEY")
     m = GEMINI_MODEL
@@ -438,53 +383,43 @@ async def _call_gemini(
     max_tok = _AGENT_MAX_TOKENS.get(agent_key, MAX_TOKENS_PER_AGENT)
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": min(temperature, 1.0),
-            "maxOutputTokens": max_tok,
-        },
+        "generationConfig": {"temperature": min(temperature, 1.0), "maxOutputTokens": max_tok},
     }
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
-    params = {"key": GEMINI_API_KEY}
     async with aiohttp.ClientSession() as s:
-        async with s.post(url, params=params, json=body, timeout=TIMEOUT) as resp:
+        async with s.post(url, params={"key": GEMINI_API_KEY},
+                          json=body, timeout=TIMEOUT) as resp:
             raw = await resp.text()
             if resp.status != 200:
                 raise RuntimeError(f"Gemini HTTP {resp.status}: {raw[:400]}")
             data = await resp.json()
             cand = data.get("candidates") or []
             if not cand:
-                raise RuntimeError(f"Gemini: нет candidates — {raw[:250]}")
-            parts = cand[0].get("content", {}).get("parts") or []
-            if not parts or not parts[0].get("text"):
+                raise RuntimeError(f"Gemini: нет candidates")
+            parts_g = cand[0].get("content", {}).get("parts") or []
+            if not parts_g or not parts_g[0].get("text"):
                 raise RuntimeError("Gemini: пустой текст")
-            out = parts[0]["text"].strip()
+            out = parts_g[0]["text"].strip()
             if agent_key:
                 _track_model(agent_key, "Gemini", m)
             return out
 
 
-async def _call_together(
-    prompt: str,
-    system: str,
-    temperature: float,
-    model: str = None,
-    agent_key: str = None,
-) -> str:
-    """Together AI — KEY_1 → KEY_2 при 429."""
+async def _call_together(prompt: str, system: str, temperature: float,
+                         model: str = None, agent_key: str = None) -> str:
     m = model or TOGETHER_MODEL
-    keys_to_try = []
-    if TOGETHER_API_KEY:   keys_to_try.append(("Together#1", TOGETHER_API_KEY))
-    if TOGETHER_API_KEY_2: keys_to_try.append(("Together#2", TOGETHER_API_KEY_2))
+    keys_to_try = [(n, k) for n, k in [
+        ("Together#1", TOGETHER_API_KEY),
+        ("Together#2", TOGETHER_API_KEY_2),
+    ] if k]
     if not keys_to_try:
         raise ValueError("Нет TOGETHER_API_KEY")
-
     last_err = None
     for key_name, key in keys_to_try:
         try:
             result = await _call_openai_style(
-                TOGETHER_URL, key, m,
-                prompt, system, temperature, key_name,
+                TOGETHER_URL, key, m, prompt, system, temperature, key_name,
                 agent_key=agent_key
             )
             if agent_key:
@@ -532,22 +467,18 @@ async def _call_for_agent(agent_key: str, prompt: str, system: str, temperature:
         provider = config["provider"]
         model    = config["model"]
         try:
-            if provider == "mistral":
+            if provider == "cerebras":
+                result = await _call_cerebras(prompt, system, temperature, model, agent_key=agent_key)
+            elif provider == "mistral":
                 result = await _call_mistral_throttled(prompt, system, temperature, model, agent_key=agent_key)
             elif provider == "groq":
                 result = await _call_groq(prompt, system, temperature, model, agent_key=agent_key)
             elif provider == "openrouter":
-                result = await _call_openrouter_model(
-                    prompt, system, temperature, model, agent_key=agent_key
-                )
+                result = await _call_openrouter_model(prompt, system, temperature, model, agent_key=agent_key)
             elif provider == "together":
-                result = await _call_together(
-                    prompt, system, temperature, model, agent_key=agent_key
-                )
+                result = await _call_together(prompt, system, temperature, model, agent_key=agent_key)
             elif provider == "gemini":
                 result = await _call_gemini(prompt, system, temperature, agent_key=agent_key)
-            elif provider == "cerebras":
-                result = await _call_cerebras(prompt, system, temperature, agent_key=agent_key)
             else:
                 raise ValueError(f"Неизвестный провайдер: {provider}")
             logger.info(f"[{agent_key}] → {provider}/{model} ✅")
@@ -555,13 +486,8 @@ async def _call_for_agent(agent_key: str, prompt: str, system: str, temperature:
         except Exception as e:
             logger.warning(f"[{agent_key}] → {provider}/{model} ❌ {e}")
 
-        # Synth: только для Mistral Large → пробуем Small
-        if (
-            agent_key == "synth"
-            and provider == "mistral"
-            and model
-            and "large" in model.lower()
-        ):
+        if (agent_key == "synth" and provider == "mistral"
+                and model and "large" in model.lower()):
             try:
                 result = await _call_mistral_throttled(
                     prompt, system, temperature, "mistral-small-latest", agent_key=agent_key
@@ -572,34 +498,23 @@ async def _call_for_agent(agent_key: str, prompt: str, system: str, temperature:
                 logger.warning(f"[{agent_key}] synth mistral-small ❌ {e2}")
 
     skip_p = frozenset({config["provider"]} if config else [])
-    return await _call_best_available(
-        prompt, system, temperature, agent_key,
-        skip_providers=skip_p,
-    )
+    return await _call_best_available(prompt, system, temperature, agent_key, skip_providers=skip_p)
 
 
 async def _call_best_available(
-    prompt: str,
-    system: str,
-    temperature: float,
-    agent_name: str = "general",
-    *,
-    skip_providers: frozenset | None = None,
+    prompt: str, system: str, temperature: float,
+    agent_name: str = "general", *, skip_providers: frozenset | None = None,
 ) -> str:
     """
-    Цепочка fallback. skip_providers — не вызывать тот же API повторно
-    (primary уже отработал или упал).
+    Fallback цепочка: Cerebras → OpenRouter → Together → Groq → Mistral → Gemini
     """
     skip = set(skip_providers or [])
-
     providers = []
-    if "mistral" not in skip and (MISTRAL_API_KEY or MISTRAL_API_KEY_2):
-        providers.append(("Mistral Small",
-            lambda p, s, t: _call_mistral_throttled(p, s, t, agent_key=agent_name)))
 
-    if "groq" not in skip and (GROQ_API_KEY or GROQ_API_KEY_2 or GROQ_API_KEY_3):
-        providers.append(("Groq/Llama",
-            lambda p, s, t: _call_groq(p, s, t, agent_key=agent_name)))
+    # ФИX 4: Cerebras добавлен в fallback цепочку (первым — самый быстрый)
+    if "cerebras" not in skip and CEREBRAS_API_KEY:
+        providers.append(("Cerebras/Llama",
+            lambda p, s, t: _call_cerebras(p, s, t, agent_key=agent_name)))
 
     if "openrouter" not in skip and (OPENROUTER_API_KEY or OPENROUTER_API_KEY_2):
         providers.append(("OpenRouter/Llama",
@@ -611,16 +526,20 @@ async def _call_best_available(
         providers.append(("Together/Llama",
             lambda p, s, t: _call_together(p, s, t, agent_key=agent_name)))
 
-    if "cerebras" not in skip and CEREBRAS_API_KEY:
-        providers.append(("Cerebras/Llama",
-            lambda p, s, t: _call_cerebras(p, s, t, agent_key=agent_name)))
+    if "groq" not in skip and (GROQ_API_KEY or GROQ_API_KEY_2 or GROQ_API_KEY_3):
+        providers.append(("Groq/Llama",
+            lambda p, s, t: _call_groq(p, s, t, agent_key=agent_name)))
+
+    if "mistral" not in skip and (MISTRAL_API_KEY or MISTRAL_API_KEY_2):
+        providers.append(("Mistral Small",
+            lambda p, s, t: _call_mistral_throttled(p, s, t, agent_key=agent_name)))
 
     if "gemini" not in skip and GEMINI_API_KEY:
         providers.append(("Gemini",
             lambda p, s, t: _call_gemini(p, s, t, agent_key=agent_name)))
 
     if not providers:
-        raise ValueError("Нет API ключей! Добавь GROQ_API_KEY и MISTRAL_API_KEY в Railway")
+        raise ValueError("Нет API ключей! Добавь хотя бы один из: CEREBRAS_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY")
 
     last_error = None
     for name, caller in providers:
@@ -632,7 +551,7 @@ async def _call_best_available(
             logger.warning(f"[{agent_name}] fallback → {name} ❌ {e}")
             last_error = e
 
-    raise RuntimeError(f"Все провайдеры недоступны. Последняя ошибка: {last_error}")
+    raise RuntimeError(f"Все провайдеры недоступны: {last_error}")
 
 
 # ── Публичный класс ───────────────────────────────────────────────────────────
@@ -640,24 +559,22 @@ async def _call_best_available(
 class AgentProvider:
 
     async def bull(self, prompt: str, system: str = "", temperature: float = None) -> str:
-        t = temperature or AGENT_TEMPERATURE
-        return await _call_for_agent("bull", prompt, system, t)
+        return await _call_for_agent("bull", prompt, system, temperature or AGENT_TEMPERATURE)
 
     async def bear(self, prompt: str, system: str = "", temperature: float = None) -> str:
-        t = (temperature or AGENT_TEMPERATURE) * 0.4
-        return await _call_for_agent("bear", prompt, system, t)
+        return await _call_for_agent("bear", prompt, system, (temperature or AGENT_TEMPERATURE) * 0.4)
 
     async def verifier(self, prompt: str, system: str = "", temperature: float = None) -> str:
-        t = 0.1
-        return await _call_for_agent("verifier", prompt, system, t)
+        return await _call_for_agent("verifier", prompt, system, 0.1)
 
     async def synth(self, prompt: str, system: str = "", temperature: float = None) -> str:
-        t = (temperature or AGENT_TEMPERATURE) * 0.6
-        return await _call_for_agent("synth", prompt, system, t)
+        return await _call_for_agent("synth", prompt, system, (temperature or AGENT_TEMPERATURE) * 0.6)
 
     async def complete(self, prompt: str, system: str = "", temperature: float = None) -> str:
-        t = temperature or AGENT_TEMPERATURE
-        return await _call_best_available(prompt, system, t, "general", skip_providers=frozenset())
+        return await _call_best_available(
+            prompt, system, temperature or AGENT_TEMPERATURE,
+            "general", skip_providers=frozenset()
+        )
 
 
 ai = AgentProvider()
