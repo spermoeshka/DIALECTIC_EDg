@@ -142,28 +142,28 @@ def _resolve_agent_models() -> dict:
              "bear": {"provider": "gemini", "model": GEMINI_MODEL},
              "synth": {"provider": "gemini", "model": GEMINI_MODEL}}
     elif want == "mixed":
-    bull_p = "groq"       if _can_use_primary("groq")       else "mistral"
-    bear_p = "together"   if _can_use_primary("together")   else "groq"
-    ver_p  = "openrouter" if _can_use_primary("openrouter") else "groq"
-    syn_p  = "mistral"    if _can_use_primary("mistral")    else "groq"
-
-    def _model_for(p):
-        if p == "groq":
+        bull_p = "groq"       if _can_use_primary("groq")       else "mistral"
+        bear_p = "together"   if _can_use_primary("together")   else "groq"
+        ver_p  = "openrouter" if _can_use_primary("openrouter") else "groq"
+        syn_p  = "mistral"    if _can_use_primary("mistral")    else "groq"
+    
+        def _model_for(p):
+            if p == "groq":
+                return GROQ_MODEL
+            if p == "together":
+                return TOGETHER_MODEL
+            if p == "openrouter":
+                return OPENROUTER_MODEL
+            if p == "mistral":
+                return mm
             return GROQ_MODEL
-        if p == "together":
-            return TOGETHER_MODEL
-        if p == "openrouter":
-            return OPENROUTER_MODEL
-        if p == "mistral":
-            return mm
-        return GROQ_MODEL
-
-    m = {
-        "bull":     {"provider": bull_p, "model": _model_for(bull_p)},
-        "bear":     {"provider": bear_p, "model": _model_for(bear_p)},
-        "verifier": {"provider": ver_p,  "model": _model_for(ver_p)},
-        "synth":    {"provider": syn_p,  "model": syn_m if syn_p == "mistral" else _model_for(syn_p)},
-    }
+    
+        m = {
+            "bull":     {"provider": bull_p, "model": _model_for(bull_p)},
+            "bear":     {"provider": bear_p, "model": _model_for(bear_p)},
+            "verifier": {"provider": ver_p,  "model": _model_for(ver_p)},
+            "synth":    {"provider": syn_p,  "model": syn_m if syn_p == "mistral" else _model_for(syn_p)},
+        }
     else:
         m = {"bull": {"provider": "mistral", "model": mm},
              "verifier": {"provider": "mistral", "model": mm},
