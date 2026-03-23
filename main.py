@@ -5,6 +5,7 @@ Dialectic Edge v7.1 — UX + FinBERT async + РФ-график.
 - Простой язык в выводах для обычных людей
 """
 
+import re
 import asyncio
 import logging
 import os
