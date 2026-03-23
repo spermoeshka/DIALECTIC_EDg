@@ -1486,6 +1486,8 @@ async def handle_feedback(callback: CallbackQuery):
 
 async def main():
     global scheduler
+    global bot          # ← добавь
+    bot = get_bot()     # ← добавь
 
     await init_db()
     await init_profiles_table()
