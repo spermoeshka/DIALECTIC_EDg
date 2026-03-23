@@ -492,7 +492,7 @@ async def send_daily_digest_bundle(
     logger.info(f"Отправляю {len(messages)} сообщений. Размеры: {[len(m) for m in messages]}")
     for i, msg in enumerate(messages):
         logger.info(f"Отправляю чанк {i+1}/{len(messages)}, размер: {len(msg)}")
-        await bot.send_message(chat_id, msg)
+        await bot.send_message(chat_id, clean_markdown(msg), parse_mode="Markdown")
         if i == 0:
             await send_digest_chart(chat_id, report, prices_dict or {}, stars_str, pct_val)
         await asyncio.sleep(0.3)
@@ -939,18 +939,27 @@ async def cmd_daily(message: Message):
     try:
         await increment_requests(user_id)
         report, prices = await analysis_service_run_full_analysis(user_id)
-        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        except Exception:
+            pass  # сообщение уже удалено или недоступно — не критично
         await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
 
     except Exception as e:
         logger.error(f"Daily error: {e}", exc_info=True)
-        await bot.edit_message_text(
-            f"❌ *Ошибка:* `{str(e)[:200]}`\n\n"
-            "Проверь: API ключи, интернет, BOT_TOKEN.",
-            chat_id=message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown"
-        )
+        try:
+            await bot.edit_message_text(
+                f"❌ *Ошибка:* `{str(e)[:200]}`\n\n"
+                "Проверь: API ключи, интернет, BOT_TOKEN.",
+                chat_id=message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await message.answer(
+                f"❌ *Ошибка:* `{str(e)[:200]}`\n\nПроверь: API ключи, интернет, BOT_TOKEN.",
+                parse_mode="Markdown"
+            )
 
 
 # ─── /analyze ─────────────────────────────────────────────────────────────────
@@ -991,17 +1000,23 @@ async def cmd_analyze(message: Message):
         report, prices = await analysis_service_run_full_analysis(
             user_id, custom_news=user_news, custom_mode=True
         )
-        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        except Exception:
+            pass  # сообщение уже удалено — не критично
         await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
 
     except Exception as e:
         logger.error(f"Analyze error: {e}", exc_info=True)
-        await bot.edit_message_text(
-            f"❌ *Ошибка:* `{str(e)[:200]}`",
-            chat_id=message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown"
-        )
+        try:
+            await bot.edit_message_text(
+                f"❌ *Ошибка:* `{str(e)[:200]}`",
+                chat_id=message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await message.answer(f"❌ *Ошибка:* `{str(e)[:200]}`", parse_mode="Markdown")
 
 
 
@@ -1094,11 +1109,14 @@ async def cmd_russia(message: Message):
         russia_cache["timestamp"] = datetime.now().strftime("%d.%m.%Y %H:%M")
         russia_cache["ts"]        = time.time()
 
-        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        except Exception:
+            pass  # сообщение уже удалено — не критично
 
         await send_russia_chart_photo(message.chat.id, report)
         for chunk in split_message(report):
-            await message.answer(chunk, parse_mode="Markdown")
+            await message.answer(clean_markdown(chunk), parse_mode="Markdown")
 
         await message.answer(
             "💬 *Был ли анализ полезным?*",
@@ -1108,12 +1126,15 @@ async def cmd_russia(message: Message):
 
     except Exception as e:
         logger.error(f"Russia error: {e}", exc_info=True)
-        await bot.edit_message_text(
-            f"❌ *Ошибка:* `{str(e)[:200]}`",
-            chat_id=message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown"
-        )
+        try:
+            await bot.edit_message_text(
+                f"❌ *Ошибка:* `{str(e)[:200]}`",
+                chat_id=message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await message.answer(f"❌ *Ошибка:* `{str(e)[:200]}`", parse_mode="Markdown")
 
 
 
@@ -1155,14 +1176,17 @@ async def handle_russia_choice(callback: CallbackQuery):
         russia_cache["timestamp"] = datetime.now().strftime("%d.%m.%Y %H:%M")
         russia_cache["ts"]        = time.time()
 
-        await bot.delete_message(
-            chat_id=callback.message.chat.id,
-            message_id=wait_msg.message_id
-        )
+        try:
+            await bot.delete_message(
+                chat_id=callback.message.chat.id,
+                message_id=wait_msg.message_id
+            )
+        except Exception:
+            pass  # сообщение уже удалено — не критично
 
         await send_russia_chart_photo(callback.message.chat.id, report)
         for chunk in split_message(report):
-            await callback.message.answer(chunk, parse_mode="Markdown")
+            await callback.message.answer(clean_markdown(chunk), parse_mode="Markdown")
 
         await callback.message.answer(
             "💬 *Был ли анализ полезным?*",
@@ -1172,12 +1196,15 @@ async def handle_russia_choice(callback: CallbackQuery):
 
     except Exception as e:
         logger.error(f"Russia choice error: {e}", exc_info=True)
-        await bot.edit_message_text(
-            f"❌ *Ошибка:* `{str(e)[:200]}`",
-            chat_id=callback.message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown"
-        )
+        try:
+            await bot.edit_message_text(
+                f"❌ *Ошибка:* `{str(e)[:200]}`",
+                chat_id=callback.message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await callback.message.answer(f"❌ *Ошибка:* `{str(e)[:200]}`", parse_mode="Markdown")
 
 
 # ─── /markets ─────────────────────────────────────────────────────────────────
