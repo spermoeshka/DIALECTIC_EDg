@@ -32,51 +32,77 @@ HEADERS = {
 async def fetch_cbr_data() -> str:
     results = []
 
-    # Курсы валют через XML API ЦБ
+    # Курсы валют — PRIMARY: Yahoo Finance (работает с Railway)
+    yahoo_pairs = [
+        ("USDRUB=X", "💵 Доллар"),
+        ("EURRUB=X", "💶 Евро"),
+        ("CNYRUB=X", "🇨🇳 Юань"),
+    ]
+    yahoo_success = False
     try:
-        url = "https://www.cbr.ru/scripts/XML_daily.asp"
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            async with session.get(url, timeout=TIMEOUT) as resp:
-                if resp.status == 200:
-                    text = await resp.text(encoding="windows-1251")
-                    currencies = {
-                        "USD": "💵 Доллар",
-                        "EUR": "💶 Евро",
-                        "CNY": "🇨🇳 Юань",
-                        "TRY": "🇹🇷 Лира",
-                        "AMD": "🇦🇲 Драм",
-                        "KZT": "🇰🇿 Тенге",
-                    }
-                    for code, name in currencies.items():
-                        pattern = rf'<CharCode>{code}</CharCode>.*?<Nominal>(\d+)</Nominal>.*?<Value>([\d,]+)</Value>'
-                        m = re.search(pattern, text, re.DOTALL)
-                        if m:
-                            nominal = int(m.group(1))
-                            val = float(m.group(2).replace(",", "."))
-                            if nominal > 1:
-                                results.append(f"• {name}: *{val:.2f} ₽* (за {nominal})")
-                            else:
-                                results.append(f"• {name}: *{val:.2f} ₽*")
+        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+            for ticker, name in yahoo_pairs:
+                try:
+                    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            price = data["chart"]["result"][0]["meta"].get("regularMarketPrice", 0)
+                            if price:
+                                results.append(f"• {name}: *{price:.2f} ₽*")
+                                yahoo_success = True
+                except Exception:
+                    pass
     except Exception as e:
-        logger.warning(f"CBR курсы error: {e}")
+        logger.warning(f"Yahoo курсы error: {e}")
 
-    # Ключевая ставка — используем официальный JSON API ЦБ РФ
-    # Метод 1: прямой API статистики ЦБ (самый надёжный)
+    # Fallback курсы: cbr.ru XML (AMD, KZT, TRY + резерв для USD/EUR/CNY)
+    if not yahoo_success:
+        try:
+            url = "https://www.cbr.ru/scripts/XML_daily.asp"
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with session.get(url, timeout=TIMEOUT) as resp:
+                    if resp.status == 200:
+                        text = await resp.text(encoding="windows-1251")
+                        currencies = {
+                            "USD": "💵 Доллар",
+                            "EUR": "💶 Евро",
+                            "CNY": "🇨🇳 Юань",
+                            "TRY": "🇹🇷 Лира",
+                            "AMD": "🇦🇲 Драм",
+                            "KZT": "🇰🇿 Тенге",
+                        }
+                        for code, name in currencies.items():
+                            pattern = rf'<CharCode>{code}</CharCode>.*?<Nominal>(\d+)</Nominal>.*?<Value>([\d,]+)</Value>'
+                            m = re.search(pattern, text, re.DOTALL)
+                            if m:
+                                nominal = int(m.group(1))
+                                val = float(m.group(2).replace(",", "."))
+                                if nominal > 1:
+                                    results.append(f"• {name}: *{val:.2f} ₽* (за {nominal})")
+                                else:
+                                    results.append(f"• {name}: *{val:.2f} ₽*")
+        except Exception as e:
+            logger.warning(f"CBR курсы error: {e}")
+
+    # Ключевая ставка ЦБ
+    # Метод 1: HTML парсинг cbr.ru — работает с Railway (подтверждено логами)
     rate_fetched = False
     try:
-        url = "https://api.cbr.ru/keyrate"
+        url = "https://www.cbr.ru/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From=01.01.2025&UniDbQuery.To=31.12.2026"
         async with aiohttp.ClientSession(headers=HEADERS) as session:
             async with session.get(url, timeout=TIMEOUT) as resp:
                 if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    # Формат: [{"Date": "2026-03-20", "Rate": 15.0}, ...]
-                    if isinstance(data, list) and data:
-                        # Берём самую свежую запись (сортируем по дате)
-                        sorted_data = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
-                        latest = sorted_data[0]
-                        rate_f = float(latest.get("Rate", 0))
-                        date_str = latest.get("Date", "")[:10]
-                        if rate_f > 0:
+                    text = await resp.text()
+                    rows = re.findall(r'(\d{2}\.\d{2}\.\d{4})\s*</td>\s*<td[^>]*>\s*([\d,\.]+)\s*</td>', text)
+                    if rows:
+                        def parse_date(d):
+                            parts = d.split(".")
+                            return (int(parts[2]), int(parts[1]), int(parts[0]))
+                        rows_sorted = sorted(rows, key=lambda r: parse_date(r[0]), reverse=True)
+                        date_str, rate_str = rows_sorted[0]
+                        rate_f = float(rate_str.replace(",", "."))
+                        if 1 < rate_f < 100:
                             if rate_f >= 20:
                                 comment = "🔴 _исторически высокая — давит на бизнес и ипотеку_"
                             elif rate_f >= 16:
@@ -87,11 +113,39 @@ async def fetch_cbr_data() -> str:
                                 comment = "🟢 _умеренная_"
                             results.append(f"• 🏦 Ключевая ставка ЦБ: *{rate_f:.2f}%* {comment} _(на {date_str})_")
                             rate_fetched = True
-                            logger.info(f"CBR rate API: {rate_f}% на {date_str}")
+                            logger.info(f"CBR rate HTML: {rate_f}% на {date_str}")
     except Exception as e:
-        logger.warning(f"CBR rate API v1 error: {e}")
+        logger.warning(f"CBR ставка HTML error: {e}")
 
-    # Метод 2: ФРСП API ЦБ (запасной)
+    # Метод 2: прямой JSON API ЦБ (запасной)
+    if not rate_fetched:
+        try:
+            url = "https://api.cbr.ru/keyrate"
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with session.get(url, timeout=TIMEOUT) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        if isinstance(data, list) and data:
+                            sorted_data = sorted(data, key=lambda x: x.get("Date", ""), reverse=True)
+                            latest = sorted_data[0]
+                            rate_f = float(latest.get("Rate", 0))
+                            date_str = latest.get("Date", "")[:10]
+                            if rate_f > 0:
+                                if rate_f >= 20:
+                                    comment = "🔴 _исторически высокая — давит на бизнес и ипотеку_"
+                                elif rate_f >= 16:
+                                    comment = "🟠 _высокая — кредиты дорогие_"
+                                elif rate_f >= 12:
+                                    comment = "🟡 _умеренно высокая_"
+                                else:
+                                    comment = "🟢 _умеренная_"
+                                results.append(f"• 🏦 Ключевая ставка ЦБ: *{rate_f:.2f}%* {comment} _(на {date_str})_")
+                                rate_fetched = True
+                                logger.info(f"CBR rate API: {rate_f}% на {date_str}")
+        except Exception as e:
+            logger.warning(f"CBR rate API v1 error: {e}")
+
+    # Метод 3: API ЦБ с датами (запасной)
     if not rate_fetched:
         try:
             from datetime import date, timedelta
@@ -121,38 +175,16 @@ async def fetch_cbr_data() -> str:
         except Exception as e:
             logger.warning(f"CBR rate API v2 error: {e}")
 
-    # Метод 3: HTML парсинг (последний резерв) — исправленная версия
+    # Метод 4: hardcoded fallback — обновляй вручную при изменении ставки ЦБ
     if not rate_fetched:
-        try:
-            url = "https://www.cbr.ru/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From=01.01.2025&UniDbQuery.To=31.12.2026"
-            async with aiohttp.ClientSession(headers=HEADERS) as session:
-                async with session.get(url, timeout=TIMEOUT) as resp:
-                    if resp.status == 200:
-                        text = await resp.text()
-                        # Ищем строки таблицы: дата + ставка
-                        # Берём ПЕРВУЮ строку после заголовка — это самая свежая запись
-                        rows = re.findall(r'(\d{2}\.\d{2}\.\d{4})\s*</td>\s*<td[^>]*>\s*([\d,\.]+)\s*</td>', text)
-                        if rows:
-                            # Сортируем по дате и берём самую свежую
-                            def parse_date(d):
-                                parts = d.split(".")
-                                return (int(parts[2]), int(parts[1]), int(parts[0]))
-                            rows_sorted = sorted(rows, key=lambda r: parse_date(r[0]), reverse=True)
-                            date_str, rate_str = rows_sorted[0]
-                            rate_f = float(rate_str.replace(",", "."))
-                            if 1 < rate_f < 100:  # санити-проверка
-                                if rate_f >= 20:
-                                    comment = "🔴 _исторически высокая_"
-                                elif rate_f >= 16:
-                                    comment = "🟠 _высокая_"
-                                elif rate_f >= 12:
-                                    comment = "🟡 _умеренно высокая_"
-                                else:
-                                    comment = "🟢 _умеренная_"
-                                results.append(f"• 🏦 Ключевая ставка ЦБ: *{rate_f:.2f}%* {comment} _(на {date_str})_")
-                                logger.info(f"CBR rate HTML fallback: {rate_f}%")
-        except Exception as e:
-            logger.warning(f"CBR ставка HTML error: {e}")
+        LAST_KNOWN_RATE = 15.0        # актуально с 20.03.2026
+        LAST_KNOWN_RATE_DATE = "20.03.2026"
+        results.append(
+            f"• 🏦 Ключевая ставка ЦБ: *{LAST_KNOWN_RATE:.2f}%* "
+            f"🟠 _высокая — кредиты дорогие_ "
+            f"_(резерв на {LAST_KNOWN_RATE_DATE})_"
+        )
+        logger.warning(f"CBR rate: все методы недоступны — используем резерв {LAST_KNOWN_RATE}%")
 
     if not results:
         return ""
@@ -355,12 +387,17 @@ async def fetch_russia_news() -> str:
     all_news = []
 
     rss_feeds = [
+        # Работают с Railway (подтверждено логами)
+        ("ТАСС Экономика",   "https://tass.ru/rss/v2.xml"),
+        ("Lenta.ru",         "https://lenta.ru/rss/news"),
+        ("RIA Новости",      "https://ria.ru/export/rss2/economy/index.xml"),
+        ("Интерфакс",        "https://www.interfax.ru/rss.asp"),
+        # Могут работать с Railway — пробуем
+        ("Коммерсант",       "https://www.kommersant.ru/RSS/main.xml"),
+        ("Ведомости",        "https://www.vedomosti.ru/rss/news"),
         ("РБК Экономика",    "https://rss.rbc.ru/finances/rss.rss"),
         ("РБК Бизнес",       "https://rss.rbc.ru/business/rss.rss"),
         ("РБК Политика",     "https://rss.rbc.ru/politics/rss.rss"),
-        ("Коммерсант",       "https://www.kommersant.ru/RSS/main.xml"),
-        ("Ведомости",        "https://www.vedomosti.ru/rss/news"),
-        ("Интерфакс",        "https://www.interfax.ru/rss.asp"),
     ]
 
     # Расширенные ключевые слова — законы, налоги, бизнес, санкции
